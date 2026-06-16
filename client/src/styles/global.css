@@ -1,0 +1,35 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+body {
+  background-color: #f0f2f5;
+}
+
+.page-container {
+  padding: 24px;
+}
+
+.page-header {
+  margin-bottom: 16px;
+}
+
+.card-shadow {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.status-tag {
+  font-size: 12px;
+}
+
+.table-actions {
+  display: flex;
+  gap: 8px;
+}
