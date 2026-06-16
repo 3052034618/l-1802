@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
-import { Table, Card, Button, Tag, Space, Progress, Modal, Form, Input, Select, InputNumber, message } from 'antd'
-import { EyeOutlined, PlayCircleOutlined, ScheduleOutlined, EditOutlined } from '@ant-design/icons'
+import { Table, Card, Button, Tag, Space, Progress, Modal, Form, Input, Select, InputNumber, message, Alert, Row, Col } from 'antd'
+import { EyeOutlined, PlayCircleOutlined, ScheduleOutlined, EditOutlined, BulbOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
 import { useUserStore } from '../store'
 import { getProductionList, updateProductionProgress, scheduleProduction, getWorkshopCapacity } from '../api/production'
@@ -33,6 +33,7 @@ const ProductionList = () => {
   const [progressModalVisible, setProgressModalVisible] = useState(false)
   const [scheduleModalVisible, setScheduleModalVisible] = useState(false)
   const [selectedId, setSelectedId] = useState(null)
+  const [expandedRowKeys, setExpandedRowKeys] = useState([])
   const [form] = Form.useForm()
   const [scheduleForm] = Form.useForm()
   const [capacity, setCapacity] = useState([])
@@ -67,6 +68,81 @@ const ProductionList = () => {
     } catch (err) {
       console.error('获取车间产能失败:', err)
     }
+  }
+
+  const parseRecommendData = (record) => {
+    try {
+      return typeof record.recommend_data === 'string' ? JSON.parse(record.recommend_data) : record.recommend_data
+    } catch (e) {
+      return null
+    }
+  }
+
+  const expandedRowRender = (record) => {
+    const recData = parseRecommendData(record)
+    if (!recData) {
+      return <Alert message="暂无系统推荐依据" type="info" showIcon />
+    }
+
+    return (
+      <div style={{ padding: '0 24px 12px', background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 4, marginLeft: 56 }}>
+        <div style={{ fontWeight: 500, color: '#389e0d', marginBottom: 8 }}>
+          <BulbOutlined style={{ marginRight: 4 }} />系统排产推荐依据
+        </div>
+        <Row gutter={16} style={{ marginBottom: 10 }}>
+          <Col span={6}>
+            <div style={{ color: '#666', fontSize: 12 }}>推荐产线</div>
+            <div style={{ fontWeight: 500 }}>{recData.recommended?.lineName || recData.recommended?.line || '-'}</div>
+          </Col>
+          <Col span={6}>
+            <div style={{ color: '#666', fontSize: 12 }}>推荐日期</div>
+            <div style={{ fontWeight: 500 }}>{recData.recommended?.date || '-'}</div>
+          </Col>
+          <Col span={6}>
+            <div style={{ color: '#666', fontSize: 12 }}>推荐分数</div>
+            <div style={{ fontWeight: 500, color: '#52c41a' }}>{recData.recommended?.score || 0}分</div>
+          </Col>
+          <Col span={6}>
+            <div style={{ color: '#666', fontSize: 12 }}>实际选择</div>
+            <div style={{ fontWeight: 500 }}>{record.production_line || '-'}</div>
+          </Col>
+        </Row>
+        {recData.reasons && recData.reasons.length > 0 && (
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ color: '#666', fontSize: 12, marginBottom: 4 }}>推荐理由：</div>
+            <ul style={{ margin: 0, paddingLeft: 20, color: '#595959', fontSize: 12 }}>
+              {recData.reasons.map((r, idx) => (
+                <li key={idx}>{r}</li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {recData.materialSummary && (
+          <Row gutter={16} style={{ marginBottom: 8 }}>
+            <Col span={12}>
+              <span style={{ color: '#666', fontSize: 12 }}>物料类型：</span>
+              <span style={{ fontSize: 12 }}>{recData.materialSummary.categories?.join('、') || '-'}</span>
+            </Col>
+            <Col span={12}>
+              <span style={{ color: '#666', fontSize: 12 }}>物料总数量：</span>
+              <span style={{ fontSize: 12 }}>{recData.materialSummary.totalQuantity || 0} 单位</span>
+            </Col>
+          </Row>
+        )}
+        {recData.allLines && (
+          <div>
+            <div style={{ color: '#666', fontSize: 12, marginBottom: 4 }}>各产线负载情况：</div>
+            <Space size={8} wrap>
+              {recData.allLines.map((line, idx) => (
+                <Tag key={idx} color={line.isFull ? 'red' : line.loadRate > 70 ? 'orange' : 'green'}>
+                  {line.name || line.id}: {line.loadRate}% {line.isFull ? '(已满)' : `(剩余${line.availableCapacity || 0})`}
+                </Tag>
+              ))}
+            </Space>
+          </div>
+        )}
+      </div>
+    )
   }
 
   const columns = [
@@ -207,11 +283,23 @@ const ProductionList = () => {
         className="card-shadow"
         title="生产管理"
       >
+        <Alert
+          message="点击行左侧箭头可查看系统排产推荐依据详情"
+          type="info"
+          showIcon
+          style={{ marginBottom: 16 }}
+        />
         <Table
           columns={columns}
           dataSource={data}
           rowKey="id"
           loading={loading}
+          expandable={{
+            expandedRowRender,
+            expandedRowKeys,
+            onExpandedRowsChange: (keys) => setExpandedRowKeys(keys),
+            rowExpandable: (record) => !!record.recommend_data
+          }}
           pagination={{
             ...pagination,
             showSizeChanger: true,

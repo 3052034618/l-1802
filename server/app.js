@@ -17,6 +17,7 @@ const notificationRoutes = require('./routes/notification');
 const complaintRoutes = require('./routes/complaint');
 const paymentRoutes = require('./routes/payment');
 const dimensionRoutes = require('./routes/dimensions');
+const uploadRoutes = require('./routes/upload');
 
 const app = express();
 const server = http.createServer(app);
@@ -44,6 +45,7 @@ app.use('/api/notifications', notificationRoutes);
 app.use('/api/complaints', complaintRoutes);
 app.use('/api/payments', paymentRoutes);
 app.use('/api/dimensions', dimensionRoutes);
+app.use('/api/upload', uploadRoutes);
 
 app.get('/api/health', (req, res) => {
   res.json({ code: 200, message: '服务运行正常', data: { timestamp: new Date().toISOString() } });

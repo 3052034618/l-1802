@@ -604,17 +604,24 @@ const getProductionRecommend = async (req, res) => {
 
     lineScores.sort((a, b) => b.score - a.score);
 
-    const recommendedLine = lineScores.find(l => !l.isFull) || lineScores[0];
-    const recommendedDate = recommendedLine.bestDate || today.add(1, 'day').format('YYYY-MM-DD');
+    const availableLines = lineScores.filter(l => !l.isFull);
+    const allLinesFull = availableLines.length === 0;
+    const recommendedLine = allLinesFull ? null : availableLines[0];
+    const recommendedDate = recommendedLine?.bestDate || null;
 
     const reasons = [];
     reasons.push(`订单主要物料类型：${categories.join('、') || '未知'}`);
-    reasons.push(`推荐产线「${recommendedLine.name}」：匹配度${Math.round((categories.filter(c => recommendedLine.suitableCategories.includes(c)).length / Math.max(categories.length, 1)) * 100)}%，当前负载${recommendedLine.loadRate}%`);
-    reasons.push(`推荐排产日期：${recommendedDate}（最近7天中该产线负载最低）`);
+    
+    if (allLinesFull) {
+      reasons.push('⚠️ 最近7天所有产线产能已满，请生产主管手动调整排产日期或选择其他方案');
+    } else {
+      reasons.push(`推荐产线「${recommendedLine.name}」：匹配度${Math.round((categories.filter(c => recommendedLine.suitableCategories.includes(c)).length / Math.max(categories.length, 1)) * 100)}%，当前负载${recommendedLine.loadRate}%`);
+      reasons.push(`推荐排产日期：${recommendedDate}（最近7天中该产线负载最低）`);
+    }
     reasons.push(`预计物料总量：${materialItems.reduce((sum, m) => sum + m.quantity, 0).toFixed(2)} 单位`);
 
     const otherOptions = lineScores
-      .filter(l => l.id !== recommendedLine.id && !l.isFull)
+      .filter(l => l.id !== recommendedLine?.id && !l.isFull)
       .slice(0, 2)
       .map(l => ({
         id: l.id,
@@ -626,7 +633,8 @@ const getProductionRecommend = async (req, res) => {
       }));
 
     const result = {
-      recommended: {
+      allLinesFull,
+      recommended: allLinesFull ? null : {
         line: recommendedLine.id,
         lineName: recommendedLine.name,
         date: recommendedDate,

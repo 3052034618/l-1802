@@ -64,7 +64,7 @@ const createComplaint = async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    const { orderId, type, title, description, photos } = req.body;
+    const { orderId, type, title, description, photos, vouchers } = req.body;
     const customerId = req.user.id;
 
     const [orders] = await connection.query('SELECT * FROM orders WHERE id = ? AND customer_id = ?', [orderId, customerId]);
@@ -76,6 +76,8 @@ const createComplaint = async (req, res) => {
     const autoResult = autoDetermineComplaint(type, description, order);
 
     const complaintNo = generateComplaintNo();
+    
+    const voucherData = vouchers || photos || null;
 
     const [result] = await connection.query(
       `INSERT INTO customer_complaints 
@@ -84,7 +86,7 @@ const createComplaint = async (req, res) => {
         auto_reason, final_responsibility, final_compensation_plan, final_compensation_amount)
        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)`,
       [orderId, customerId, complaintNo, type || null, title, description || null,
-       photos ? JSON.stringify(photos) : null,
+       voucherData ? JSON.stringify(voucherData) : null,
        autoResult.responsibility, autoResult.compensationPlan, autoResult.compensationAmount,
        autoResult.autoReason, autoResult.responsibility, autoResult.compensationPlan, autoResult.compensationAmount]
     );

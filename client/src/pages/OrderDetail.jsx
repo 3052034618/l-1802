@@ -16,6 +16,7 @@ import { scheduleProduction, createQualityInspection, getProductionRecommend } f
 import { createComplaint } from '../api/complaint'
 import { processPayment, getPaymentRecord } from '../api/payment'
 import { getDesignDimensions } from '../api/dimension'
+import { uploadFile, getFileUrl } from '../api/upload'
 import dayjs from 'dayjs'
 
 const { Step } = Steps
@@ -65,11 +66,13 @@ const OrderDetail = () => {
   const [productionModalVisible, setProductionModalVisible] = useState(false)
   const [qualityModalVisible, setQualityModalVisible] = useState(false)
   const [complaintModalVisible, setComplaintModalVisible] = useState(false)
+  const [complaintVouchers, setComplaintVouchers] = useState([])
   const [paymentModalVisible, setPaymentModalVisible] = useState(false)
   const [payments, setPayments] = useState([])
   const [recommendData, setRecommendData] = useState(null)
   const [designDimensions, setDesignDimensions] = useState([])
   const [photos, setPhotos] = useState([])
+  const [designDimensionsList, setDesignDimensionsList] = useState([])
   const [form] = Form.useForm()
   const [productionForm] = Form.useForm()
   const [qualityForm] = Form.useForm()
@@ -123,11 +126,19 @@ const OrderDetail = () => {
       const recommend = await getProductionRecommend(id)
       setRecommendData(recommend)
       
-      if (recommend?.recommended) {
-        productionForm.setFieldsValue({
-          productionLine: recommend.recommended.line,
-          scheduleDate: dayjs(recommend.recommended.date)
-        })
+      if (recommend?.allLinesFull) {
+        message.warning('最近7天所有产线产能已满，请手动调整排产日期或选择其他方案')
+        productionForm.resetFields()
+      } else if (recommend?.recommended) {
+        const isLineFull = recommend.allLines?.find(l => l.id === recommend.recommended.line)?.isFull
+        if (!isLineFull) {
+          productionForm.setFieldsValue({
+            productionLine: recommend.recommended.line,
+            scheduleDate: dayjs(recommend.recommended.date)
+          })
+        } else {
+          productionForm.resetFields()
+        }
       }
       
       setProductionModalVisible(true)
@@ -136,6 +147,34 @@ const OrderDetail = () => {
       message.error('获取排产推荐失败')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const handleQualityPhotoChange = async ({ file, fileList }) => {
+    if (file.status === 'uploading') {
+      setPhotos(fileList)
+      return
+    }
+    if (file.status === 'done' || file.originFileObj) {
+      try {
+        const originFile = file.originFileObj || file
+        const uploaded = await uploadFile('quality', originFile)
+        const updatedList = fileList.map(f => {
+          if (f.uid === file.uid) {
+            return {
+              ...f,
+              status: 'done',
+              url: uploaded.url,
+              response: uploaded
+            }
+          }
+          return f
+        })
+        setPhotos(updatedList)
+      } catch (err) {
+        message.error('照片上传失败')
+        setPhotos(fileList.filter(f => f.uid !== file.uid))
+      }
     }
   }
 
@@ -180,17 +219,51 @@ const OrderDetail = () => {
 
   const handleSubmitDesign = async (values) => {
     try {
+      const dimensions = designDimensionsList.map((dim, idx) => ({
+        ...dim,
+        sortOrder: idx + 1
+      }))
+      
       await submitDesignPlan({
         orderId: id,
-        ...values
+        ...values,
+        dimensions
       })
       message.success('设计方案提交成功')
       setDesignModalVisible(false)
       form.resetFields()
+      setDesignDimensionsList([])
       fetchDetail()
     } catch (err) {
       console.error('提交设计方案失败:', err)
     }
+  }
+
+  const addDesignDimension = () => {
+    setDesignDimensionsList(prev => [
+      ...prev,
+      {
+        itemName: '',
+        partName: '',
+        dimensionType: 'width',
+        designValue: '',
+        tolerance: 2.0,
+        unit: 'mm'
+      }
+    ])
+  }
+
+  const removeDesignDimension = (index) => {
+    setDesignDimensionsList(prev => prev.filter((_, i) => i !== index))
+  }
+
+  const updateDesignDimension = (index, field, value) => {
+    setDesignDimensionsList(prev => prev.map((d, i) => {
+      if (i === index) {
+        return { ...d, [field]: value }
+      }
+      return d
+    }))
   }
 
   const handleConfirmDesign = async (planId, confirmed) => {
@@ -231,7 +304,9 @@ const OrderDetail = () => {
         measuredValue: parseFloat(values[`dim_${dim.id}`])
       })).filter(d => !isNaN(d.measuredValue))
 
-      const photoUrls = photos.map(p => p.url || p.name)
+      const photoUrls = photos
+        .filter(p => p.status === 'done' && p.url)
+        .map(p => p.url)
 
       const res = await createQualityInspection({
         orderId: id,
@@ -259,15 +334,53 @@ const OrderDetail = () => {
 
   const handleComplaint = async (values) => {
     try {
+      const voucherUrls = complaintVouchers
+        .filter(v => v.status === 'done' && v.url)
+        .map(v => ({
+          url: v.url,
+          originalName: v.name || v.response?.originalName || '凭证文件'
+        }))
+
       await createComplaint({
         orderId: id,
-        ...values
+        ...values,
+        vouchers: voucherUrls
       })
       message.success('投诉提交成功')
       setComplaintModalVisible(false)
       complaintForm.resetFields()
+      setComplaintVouchers([])
     } catch (err) {
       console.error('投诉提交失败:', err)
+    }
+  }
+
+  const handleComplaintVoucherChange = async ({ file, fileList }) => {
+    if (file.status === 'uploading') {
+      setComplaintVouchers(fileList)
+      return
+    }
+    if (file.status === 'done' || file.originFileObj) {
+      try {
+        const originFile = file.originFileObj || file
+        const uploaded = await uploadFile('voucher', originFile)
+        const updatedList = fileList.map(f => {
+          if (f.uid === file.uid) {
+            return {
+              ...f,
+              status: 'done',
+              url: uploaded.url,
+              name: uploaded.originalName || f.name,
+              response: uploaded
+            }
+          }
+          return f
+        })
+        setComplaintVouchers(updatedList)
+      } catch (err) {
+        message.error('凭证上传失败')
+        setComplaintVouchers(fileList.filter(f => f.uid !== file.uid))
+      }
     }
   }
 
@@ -449,7 +562,15 @@ const OrderDetail = () => {
         {productionOrders.length > 0 && (
           <>
             <Divider orientation="left">生产进度</Divider>
-            {productionOrders.map((prod) => (
+            {productionOrders.map((prod) => {
+              let recData = null
+              try {
+                recData = typeof prod.recommend_data === 'string' ? JSON.parse(prod.recommend_data) : prod.recommend_data
+              } catch (e) {
+                recData = null
+              }
+              
+              return (
               <Card size="small" key={prod.id} style={{ marginBottom: 12 }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 12 }}>
                   <span>生产单号：{prod.production_no}</span>
@@ -465,8 +586,64 @@ const OrderDetail = () => {
                   排产日期：{prod.schedule_date || '-'} | 
                   开始时间：{prod.start_time ? dayjs(prod.start_time).format('YYYY-MM-DD HH:mm') : '-'}
                 </div>
+                
+                {recData && (
+                  <div style={{ marginTop: 12, padding: 12, background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 4 }}>
+                    <div style={{ fontWeight: 500, color: '#389e0d', marginBottom: 8 }}>
+                      <span style={{ marginRight: 4 }}>📋</span>系统排产推荐依据
+                    </div>
+                    <Row gutter={16} style={{ marginBottom: 8 }}>
+                      <Col span={8}>
+                        <div style={{ color: '#666', fontSize: 12 }}>推荐产线</div>
+                        <div style={{ fontWeight: 500 }}>{recData.recommended?.lineName || recData.recommended?.line || '-'}</div>
+                      </Col>
+                      <Col span={8}>
+                        <div style={{ color: '#666', fontSize: 12 }}>推荐日期</div>
+                        <div style={{ fontWeight: 500 }}>{recData.recommended?.date || '-'}</div>
+                      </Col>
+                      <Col span={8}>
+                        <div style={{ color: '#666', fontSize: 12 }}>推荐分数</div>
+                        <div style={{ fontWeight: 500, color: '#52c41a' }}>{recData.recommended?.score || 0}分</div>
+                      </Col>
+                    </Row>
+                    {recData.reasons && recData.reasons.length > 0 && (
+                      <div>
+                        <div style={{ color: '#666', fontSize: 12, marginBottom: 4 }}>推荐理由：</div>
+                        <ul style={{ margin: 0, paddingLeft: 20, color: '#595959', fontSize: 12 }}>
+                          {recData.reasons.map((r, idx) => (
+                            <li key={idx}>{r}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+                    {recData.materialSummary && (
+                      <Row gutter={16} style={{ marginTop: 8 }}>
+                        <Col span={12}>
+                          <span style={{ color: '#666', fontSize: 12 }}>物料类型：</span>
+                          <span style={{ fontSize: 12 }}>{recData.materialSummary.categories?.join('、') || '-'}</span>
+                        </Col>
+                        <Col span={12}>
+                          <span style={{ color: '#666', fontSize: 12 }}>物料总数量：</span>
+                          <span style={{ fontSize: 12 }}>{recData.materialSummary.totalQuantity || 0} 单位</span>
+                        </Col>
+                      </Row>
+                    )}
+                    {recData.allLines && (
+                      <div style={{ marginTop: 8 }}>
+                        <div style={{ color: '#666', fontSize: 12, marginBottom: 4 }}>各产线负载情况：</div>
+                        <Space size={8} wrap>
+                          {recData.allLines.map((line, idx) => (
+                            <Tag key={idx} color={line.isFull ? 'red' : line.loadRate > 70 ? 'orange' : 'green'}>
+                              {line.name}: {line.loadRate}% {line.isFull ? '(已满)' : `(剩${line.availableCapacity})`}
+                            </Tag>
+                          ))}
+                        </Space>
+                      </div>
+                    )}
+                  </div>
+                )}
               </Card>
-            ))}
+            )})}
           </>
         )}
 
@@ -475,22 +652,143 @@ const OrderDetail = () => {
             <Divider orientation="left">质检记录</Divider>
             <List
               dataSource={qualityInspections}
-              renderItem={(item) => (
-                <Card size="small" style={{ marginBottom: 8 }}>
-                  <Space>
-                    <span>质检单号：{item.inspection_no}</span>
+              renderItem={(item) => {
+                let photos = []
+                let deviationData = []
+                try {
+                  photos = typeof item.photos === 'string' ? JSON.parse(item.photos) : (item.photos || [])
+                  deviationData = typeof item.deviation_data === 'string' ? JSON.parse(item.deviation_data) : (item.deviation_data || [])
+                } catch (e) {
+                  photos = []
+                  deviationData = []
+                }
+
+                return (
+                <Card size="small" style={{ marginBottom: 12 }}>
+                  <Space style={{ marginBottom: 12 }}>
+                    <span style={{ fontWeight: 500 }}>质检单号：{item.inspection_no}</span>
                     <Tag color={item.status === 'passed' ? 'green' : item.status === 'failed' ? 'red' : 'orange'}>
                       {item.status === 'pending' ? '待质检' :
                        item.status === 'passed' ? '合格' :
                        item.status === 'failed' ? '不合格' :
                        item.status === 'rework' ? '返工' : item.status}
                     </Tag>
+                    {item.overall_score && <span>评分：{item.overall_score}</span>}
                     <span style={{ color: '#999' }}>
                       {dayjs(item.inspected_at).format('YYYY-MM-DD HH:mm')}
                     </span>
                   </Space>
+                  
+                  {item.remark && (
+                    <div style={{ marginBottom: 8, color: '#666' }}>
+                      备注：{item.remark}
+                    </div>
+                  )}
+
+                  {photos.length > 0 && (
+                    <div style={{ marginBottom: 12 }}>
+                      <div style={{ color: '#666', fontSize: 12, marginBottom: 8 }}>📷 成品照片：</div>
+                      <Space wrap>
+                        {photos.map((url, idx) => (
+                          <a
+                            key={idx}
+                            href={getFileUrl(url)}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            style={{ display: 'inline-block' }}
+                          >
+                            <img
+                              src={getFileUrl(url)}
+                              alt={`质检照片${idx + 1}`}
+                              style={{
+                                width: 80,
+                                height: 80,
+                                objectFit: 'cover',
+                                borderRadius: 4,
+                                border: '1px solid #f0f0f0'
+                              }}
+                            />
+                          </a>
+                        ))}
+                      </Space>
+                    </div>
+                  )}
+
+                  {deviationData.length > 0 && (
+                    <div>
+                      <div style={{ color: '#666', fontSize: 12, marginBottom: 8 }}>📐 尺寸比对结果：</div>
+                      <Table
+                        size="small"
+                        dataSource={deviationData}
+                        rowKey={(record, idx) => idx}
+                        pagination={false}
+                        columns={[
+                          {
+                            title: '部位',
+                            key: 'name',
+                            render: (_, record) => (
+                              <span>
+                                {record.itemName}
+                                {record.partName && ` (${record.partName})`}
+                              </span>
+                            )
+                          },
+                          {
+                            title: '类型',
+                            dataIndex: 'dimensionType',
+                            width: 60,
+                            render: (t) => ({
+                              width: '宽度',
+                              height: '高度',
+                              depth: '深度',
+                              thickness: '厚度'
+                            }[t] || t)
+                          },
+                          {
+                            title: '设计值',
+                            key: 'design',
+                            width: 80,
+                            render: (_, record) => `${record.designValue}${record.unit || 'mm'}`
+                          },
+                          {
+                            title: '实测值',
+                            key: 'measured',
+                            width: 80,
+                            render: (_, record) => `${record.measuredValue}${record.unit || 'mm'}`
+                          },
+                          {
+                            title: '公差±',
+                            key: 'tolerance',
+                            width: 70,
+                            render: (_, record) => `${record.tolerance}${record.unit || 'mm'}`
+                          },
+                          {
+                            title: '偏差',
+                            key: 'deviation',
+                            width: 70,
+                            render: (_, record) => (
+                              <span style={{ color: record.isExceeded ? '#f5222d' : '#52c41a', fontWeight: record.isExceeded ? 500 : 'normal' }}>
+                                {record.deviation}{record.unit || 'mm'}
+                                {record.isExceeded && ' ⚠️'}
+                              </span>
+                            )
+                          },
+                          {
+                            title: '结果',
+                            key: 'result',
+                            width: 70,
+                            render: (_, record) => (
+                              <Tag color={record.isExceeded ? 'red' : 'green'}>
+                                {record.isExceeded ? '超标' : '合格'}
+                              </Tag>
+                            )
+                          }
+                        ]}
+                      />
+                    </div>
+                  )}
                 </Card>
-              )}
+              )}}
             />
           </>
         )}
@@ -499,21 +797,146 @@ const OrderDetail = () => {
       <Modal
         title="提交设计方案"
         open={designModalVisible}
-        onCancel={() => setDesignModalVisible(false)}
+        onCancel={() => {
+          setDesignModalVisible(false)
+          form.resetFields()
+          setDesignDimensionsList([])
+        }}
         footer={null}
-        width={600}
+        width={750}
       >
         <Form form={form} layout="vertical" onFinish={handleSubmitDesign}>
           <Form.Item name="title" label="方案标题" rules={[{ required: true, message: '请输入方案标题' }]}>
             <Input placeholder="请输入方案标题" />
           </Form.Item>
           <Form.Item name="description" label="方案描述">
-            <TextArea rows={4} placeholder="请描述设计方案" />
+            <TextArea rows={3} placeholder="请描述设计方案" />
           </Form.Item>
           <Form.Item name="floorPlan3dUrl" label="3D户型图链接">
             <Input placeholder="请输入3D户型图URL" />
           </Form.Item>
-          <Form.Item>
+          
+          <Divider orientation="left" style={{ margin: '12px 0', fontSize: 13 }}>
+            <span style={{ fontSize: 14, fontWeight: 500 }}>关键尺寸录入</span>
+          </Divider>
+          <Alert
+            message="请录入各构件的关键设计尺寸，后续质检将自动比对实测值"
+            type="info"
+            showIcon
+            style={{ marginBottom: 12 }}
+          />
+          
+          {designDimensionsList.length > 0 && (
+            <Table
+              size="small"
+              dataSource={designDimensionsList}
+              rowKey={(record, index) => index}
+              pagination={false}
+              columns={[
+                {
+                  title: '构件名称',
+                  dataIndex: 'itemName',
+                  width: 140,
+                  render: (_, record, index) => (
+                    <Input
+                      size="small"
+                      value={record.itemName}
+                      placeholder="如:主卧衣柜"
+                      onChange={(e) => updateDesignDimension(index, 'itemName', e.target.value)}
+                    />
+                  )
+                },
+                {
+                  title: '部件名称',
+                  dataIndex: 'partName',
+                  width: 120,
+                  render: (_, record, index) => (
+                    <Input
+                      size="small"
+                      value={record.partName}
+                      placeholder="如:柜体/门板"
+                      onChange={(e) => updateDesignDimension(index, 'partName', e.target.value)}
+                    />
+                  )
+                },
+                {
+                  title: '尺寸类型',
+                  dataIndex: 'dimensionType',
+                  width: 100,
+                  render: (_, record, index) => (
+                    <Select
+                      size="small"
+                      value={record.dimensionType}
+                      onChange={(val) => updateDesignDimension(index, 'dimensionType', val)}
+                    >
+                      <Option value="width">宽度</Option>
+                      <Option value="height">高度</Option>
+                      <Option value="depth">深度</Option>
+                      <Option value="thickness">厚度</Option>
+                    </Select>
+                  )
+                },
+                {
+                  title: '设计值(mm)',
+                  dataIndex: 'designValue',
+                  width: 110,
+                  render: (_, record, index) => (
+                    <Input
+                      size="small"
+                      type="number"
+                      step="0.1"
+                      value={record.designValue}
+                      placeholder="如:1800"
+                      onChange={(e) => updateDesignDimension(index, 'designValue', e.target.value)}
+                    />
+                  )
+                },
+                {
+                  title: '公差±(mm)',
+                  dataIndex: 'tolerance',
+                  width: 100,
+                  render: (_, record, index) => (
+                    <Input
+                      size="small"
+                      type="number"
+                      step="0.1"
+                      value={record.tolerance}
+                      placeholder="默认2.0"
+                      onChange={(e) => updateDesignDimension(index, 'tolerance', e.target.value)}
+                    />
+                  )
+                },
+                {
+                  title: '操作',
+                  key: 'action',
+                  width: 60,
+                  render: (_, __, index) => (
+                    <Button
+                      type="link"
+                      danger
+                      size="small"
+                      onClick={() => removeDesignDimension(index)}
+                    >
+                      删除
+                    </Button>
+                  )
+                }
+              ]}
+              style={{ marginBottom: 12 }}
+            />
+          )}
+          
+          <Button
+            type="dashed"
+            block
+            icon={<span style={{ fontWeight: 'bold' }}>+</span>
+            onClick={addDesignDimension}
+            style={{ marginBottom: 16 }}
+          >
+            添加尺寸项
+          </Button>
+          
+          <Form.Item style={{ marginBottom: 0 }}>
             <Button type="primary" htmlType="submit" block>
               提交方案
             </Button>
@@ -533,49 +956,59 @@ const OrderDetail = () => {
       >
         {recommendData && (
           <>
-            <Alert
-              message="系统智能推荐"
-              description={
-                <div>
-                  <p style={{ marginBottom: 4 }}>
-                    推荐产线：<strong>{recommendData.recommended?.lineName}</strong>
-                    <Tag color="green" style={{ marginLeft: 8 }}>
-                      匹配度 {recommendData.recommended?.score} 分
-                    </Tag>
-                  </p>
-                  <p style={{ marginBottom: 4 }}>
-                    推荐日期：<strong>{recommendData.recommended?.date}</strong>
-                  </p>
-                  <Divider style={{ margin: '8px 0' }} />
-                  <p style={{ fontSize: 12, color: '#666', marginBottom: 4 }}>推荐依据：</p>
-                  <ul style={{ paddingLeft: 16, fontSize: 12, color: '#666' }}>
-                    {recommendData.reasons?.map((reason, idx) => (
-                      <li key={idx} style={{ marginBottom: 2 }}>{reason}</li>
-                    ))}
-                  </ul>
-                  {recommendData.otherOptions?.length > 0 && (
-                    <>
-                      <p style={{ fontSize: 12, color: '#666', marginTop: 8, marginBottom: 4 }}>其他可选方案：</p>
-                      <ul style={{ paddingLeft: 16, fontSize: 12, color: '#999' }}>
-                        {recommendData.otherOptions.map((opt, idx) => (
-                          <li key={idx}>{opt.name} - {opt.reason}，推荐日期：{opt.bestDate}</li>
-                        ))}
-                      </ul>
-                    </>
-                  )}
-                </div>
-              }
-              type="info"
-              showIcon
-              style={{ marginBottom: 16 }}
-            />
+            {recommendData.allLinesFull ? (
+              <Alert
+                message="所有产线产能已满"
+                description="最近7天内所有产线产能均已排满，请手动调整排产日期或联系调度协调其他方案。您可以手动选择有剩余产能的产线或修改排产日期。"
+                type="warning"
+                showIcon
+                style={{ marginBottom: 16 }}
+              />
+            ) : (
+              <Alert
+                message="系统智能推荐"
+                description={
+                  <div>
+                    <p style={{ marginBottom: 4 }}>
+                      推荐产线：<strong>{recommendData.recommended?.lineName}</strong>
+                      <Tag color="green" style={{ marginLeft: 8 }}>
+                        匹配度 {recommendData.recommended?.score} 分
+                      </Tag>
+                    </p>
+                    <p style={{ marginBottom: 4 }}>
+                      推荐日期：<strong>{recommendData.recommended?.date}</strong>
+                    </p>
+                    <Divider style={{ margin: '8px 0' }} />
+                    <p style={{ fontSize: 12, color: '#666', marginBottom: 4 }}>推荐依据：</p>
+                    <ul style={{ paddingLeft: 16, fontSize: 12, color: '#666' }}>
+                      {recommendData.reasons?.map((reason, idx) => (
+                        <li key={idx} style={{ marginBottom: 2 }}>{reason}</li>
+                      ))}
+                    </ul>
+                    {recommendData.otherOptions?.length > 0 && (
+                      <>
+                        <p style={{ fontSize: 12, color: '#666', marginTop: 8, marginBottom: 4 }}>其他可选方案：</p>
+                        <ul style={{ paddingLeft: 16, fontSize: 12, color: '#999' }}>
+                          {recommendData.otherOptions.map((opt, idx) => (
+                            <li key={idx}>{opt.name} - {opt.reason}，推荐日期：{opt.bestDate}</li>
+                          ))}
+                        </ul>
+                      </>
+                    )}
+                  </div>
+                }
+                type="info"
+                showIcon
+                style={{ marginBottom: 16 }}
+              />
+            )}
             <Divider orientation="left" style={{ margin: '12px 0', fontSize: 13 }}>各产线负载情况</Divider>
             <Row gutter={[8, 8]} style={{ marginBottom: 16 }}>
               {recommendData.allLines?.map((line) => (
                 <Col span={12} key={line.id}>
                   <Card size="small" style={{ 
                     opacity: line.isFull ? 0.5 : 1,
-                    border: recommendData.recommended?.line === line.id ? '1px solid #1677ff' : '1px solid #f0f0f0'
+                    border: !recommendData.allLinesFull && recommendData.recommended?.line === line.id ? '1px solid #1677ff' : '1px solid #f0f0f0'
                   }}>
                     <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
                       <span style={{ fontSize: 12, fontWeight: 500 }}>{line.name}</span>
@@ -586,6 +1019,7 @@ const OrderDetail = () => {
                     <Progress percent={line.loadRate} size="small" status={line.isFull ? 'exception' : 'active'} />
                     <div style={{ fontSize: 11, color: '#999', marginTop: 4 }}>
                       {line.currentWorkload}/{line.capacity} 单
+                      {!line.isFull && line.bestDate && ` | 最佳: ${line.bestDate}`}
                     </div>
                   </Card>
                 </Col>
@@ -620,15 +1054,15 @@ const OrderDetail = () => {
               style={{ width: '100%' }} 
               minDate={dayjs()}
               format="YYYY-MM-DD"
-              placeholder="请选择排产日期"
+              placeholder={recommendData?.allLinesFull ? '所有产线已满，请选择更远的日期' : '请选择排产日期'}
             />
           </Form.Item>
           <Form.Item name="remark" label="备注">
-            <TextArea rows={2} placeholder="请输入备注（可选）" />
+            <TextArea rows={2} placeholder={recommendData?.allLinesFull ? '请说明特殊排产原因或协调方案' : '请输入备注（可选）'} />
           </Form.Item>
           <Form.Item>
-            <Button type="primary" htmlType="submit" block loading={loading}>
-              确认排产
+            <Button type="primary" htmlType="submit" block loading={loading} disabled={recommendData?.allLines?.every(l => l.isFull)}>
+              {recommendData?.allLines?.every(l => l.isFull) ? '所有产线已满，无法提交' : '确认排产'}
             </Button>
           </Form.Item>
         </Form>
@@ -653,9 +1087,10 @@ const OrderDetail = () => {
             <Upload
               listType="picture-card"
               fileList={photos}
-              onChange={({ fileList }) => setPhotos(fileList)}
-              beforeUpload={() => false}
+              onChange={handleQualityPhotoChange}
+              customRequest={({ onSuccess }) => onSuccess('ok')}
               multiple
+              accept="image/*"
             >
               <div>
                 <CameraOutlined style={{ fontSize: 24 }} />
@@ -823,9 +1258,13 @@ const OrderDetail = () => {
       <Modal
         title="发起投诉"
         open={complaintModalVisible}
-        onCancel={() => setComplaintModalVisible(false)}
+        onCancel={() => {
+          setComplaintModalVisible(false)
+          complaintForm.resetFields()
+          setComplaintVouchers([])
+        }}
         footer={null}
-        width={500}
+        width={520}
       >
         <Form form={complaintForm} layout="vertical" onFinish={handleComplaint}>
           <Form.Item name="type" label="投诉类型" rules={[{ required: true, message: '请选择投诉类型' }]}>
@@ -842,7 +1281,18 @@ const OrderDetail = () => {
           <Form.Item name="description" label="详细描述" rules={[{ required: true, message: '请输入详细描述' }]}>
             <TextArea rows={4} placeholder="请详细描述您遇到的问题" />
           </Form.Item>
-          <Form.Item>
+          <Form.Item label="上传凭证（支持图片、PDF、Word、Excel等）">
+            <Upload
+              fileList={complaintVouchers}
+              onChange={handleComplaintVoucherChange}
+              customRequest={({ onSuccess }) => onSuccess('ok')}
+              multiple
+              accept="image/*,.pdf,.doc,.docx,.xls,.xlsx"
+            >
+              <Button icon={<UploadOutlined />}>选择文件</Button>
+            </Upload>
+          </Form.Item>
+          <Form.Item style={{ marginBottom: 0 }}>
             <Button type="primary" danger htmlType="submit" block>
               提交投诉
             </Button>

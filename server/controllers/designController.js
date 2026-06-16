@@ -7,7 +7,7 @@ const submitDesignPlan = async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    const { orderId, title, description, designFiles, floorPlan3dUrl, renderings } = req.body;
+    const { orderId, title, description, designFiles, floorPlan3dUrl, renderings, dimensions } = req.body;
     const designerId = req.user.id;
 
     const [orders] = await connection.query('SELECT * FROM orders WHERE id = ? AND designer_id = ?', [orderId, designerId]);
@@ -32,7 +32,22 @@ const submitDesignPlan = async (req, res) => {
        renderings ? JSON.stringify(renderings) : null]
     );
 
-    await generateMaterialList(orderId, result.insertId, connection);
+    const designPlanId = result.insertId;
+
+    if (dimensions && dimensions.length > 0) {
+      for (let i = 0; i < dimensions.length; i++) {
+        const dim = dimensions[i];
+        await connection.query(
+          `INSERT INTO design_dimensions 
+           (design_plan_id, order_id, item_name, part_name, dimension_type, design_value, tolerance, unit, sort_order)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          [designPlanId, orderId, dim.itemName, dim.partName || null, dim.dimensionType || 'width', 
+           parseFloat(dim.designValue) || 0, parseFloat(dim.tolerance) || 2.0, dim.unit || 'mm', i + 1]
+        );
+      }
+    }
+
+    await generateMaterialList(orderId, designPlanId, connection);
 
     await connection.query(
       "UPDATE orders SET status = 'pending_confirmation' WHERE id = ?",
@@ -50,7 +65,7 @@ const submitDesignPlan = async (req, res) => {
 
     await connection.commit();
 
-    res.json(success({ planId: result.insertId, version: nextVersion }, '设计方案提交成功'));
+    res.json(success({ planId: designPlanId, version: nextVersion }, '设计方案提交成功'));
   } catch (err) {
     await connection.rollback();
     console.error('提交设计方案错误:', err);

@@ -10,10 +10,40 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { useUserStore } from '../store'
 import { getComplaintList, handleComplaint, getComplaintDetail } from '../api/complaint'
+import { uploadFile, getFileUrl } from '../api/upload'
 import dayjs from 'dayjs'
 
 const { Option } = Select
 const { TextArea } = Input
+
+const parseVouchers = (data) => {
+  if (!data) return []
+  try {
+    const parsed = typeof data === 'string' ? JSON.parse(data) : data
+    if (!Array.isArray(parsed)) return []
+    return parsed.map(v => {
+      if (typeof v === 'string') {
+        return { url: v, originalName: '凭证文件' }
+      }
+      return v
+    })
+  } catch (e) {
+    return []
+  }
+}
+
+const getAllVouchers = (record) => {
+  const customerVouchers = parseVouchers(record?.photos)
+  const handlerVouchers = parseVouchers(record?.voucher_urls)
+  const all = []
+  customerVouchers.forEach((v, idx) => {
+    all.push({ ...v, source: 'customer', sourceLabel: '客户凭证', idx: idx + 1 })
+  })
+  handlerVouchers.forEach((v, idx) => {
+    all.push({ ...v, source: 'handler', sourceLabel: '处理凭证', idx: idx + 1 })
+  })
+  return all
+}
 
 const statusColors = {
   pending: 'orange',
@@ -160,37 +190,41 @@ const ComplaintList = () => {
       width: 110,
       render: (amount, record) => {
         const finalAmount = amount != null ? amount : record.auto_compensation_amount
+        const display = record.status === 'pending' ? '建议¥' : '¥'
         return finalAmount > 0 ? (
           <span style={{ color: '#f5222d', fontWeight: 500 }}>
-            ¥{finalAmount.toLocaleString()}
+            {display}{finalAmount.toLocaleString()}
           </span>
         ) : '-'
       }
     },
     {
       title: '凭证',
-      dataIndex: 'voucher_urls',
-      width: 80,
-      render: (urls) => {
-        if (!urls || urls.length === 0) return '-'
+      dataIndex: 'photos',
+      width: 90,
+      render: (_, record) => {
+        const allVouchers = getAllVouchers(record)
+        if (allVouchers.length === 0) return '-'
         return (
-          <Button 
-            type="link" 
-            size="small" 
-            icon={<DownloadOutlined />}
-            onClick={() => {
-              try {
-                const parsed = typeof urls === 'string' ? JSON.parse(urls) : urls
-                if (parsed && parsed.length > 0) {
-                  window.open(parsed[0], '_blank')
-                }
-              } catch (e) {
-                console.error('解析凭证失败:', e)
-              }
-            }}
-          >
-            下载
-          </Button>
+          <Space size={4}>
+            {allVouchers.slice(0, 2).map((v, idx) => (
+              <Button
+                key={idx}
+                type="link"
+                size="small"
+                icon={<DownloadOutlined />}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  window.open(getFileUrl(v.url), '_blank')
+                }}
+              >
+                {v.sourceLabel.slice(0, 2)}
+              </Button>
+            ))}
+            {allVouchers.length > 2 && (
+              <span style={{ color: '#999', fontSize: 12 }}>+{allVouchers.length - 2}</span>
+            )}
+          </Space>
         )
       }
     },
@@ -253,16 +287,51 @@ const ComplaintList = () => {
 
   const handleSubmit = async (values) => {
     try {
-      const voucherUrls = vouchers.map(v => v.url || v.name)
+      const voucherUrls = vouchers
+        .filter(v => v.status === 'done' && v.url)
+        .map(v => ({
+          url: v.url,
+          originalName: v.name || v.response?.originalName || '处理凭证'
+        }))
       await handleComplaint(selectedId, {
         ...values,
         voucherUrls
       })
       message.success('处理成功')
       setModalVisible(false)
+      setVouchers([])
       fetchData()
     } catch (err) {
       console.error('处理失败:', err)
+    }
+  }
+
+  const handleVoucherChange = async ({ file, fileList }) => {
+    if (file.status === 'uploading') {
+      setVouchers(fileList)
+      return
+    }
+    if (file.status === 'done' || file.originFileObj) {
+      try {
+        const originFile = file.originFileObj || file
+        const uploaded = await uploadFile('voucher', originFile)
+        const updatedList = fileList.map(f => {
+          if (f.uid === file.uid) {
+            return {
+              ...f,
+              status: 'done',
+              url: uploaded.url,
+              name: uploaded.originalName || f.name,
+              response: uploaded
+            }
+          }
+          return f
+        })
+        setVouchers(updatedList)
+      } catch (err) {
+        message.error('凭证上传失败')
+        setVouchers(fileList.filter(f => f.uid !== file.uid))
+      }
     }
   }
 
@@ -310,6 +379,29 @@ const ComplaintList = () => {
               <Descriptions.Item label="投诉描述" span={2}>{detailData.description}</Descriptions.Item>
             </Descriptions>
 
+            {(() => {
+              const customerVouchers = parseVouchers(detailData.photos)
+              if (customerVouchers.length > 0) {
+                return (
+                  <div style={{ marginBottom: 16 }}>
+                    <p style={{ marginBottom: 8, fontWeight: 500 }}>客户上传的凭证：</p>
+                    <Space wrap>
+                      {customerVouchers.map((v, idx) => (
+                        <Button
+                          key={idx}
+                          icon={<DownloadOutlined />}
+                          onClick={() => window.open(getFileUrl(v.url), '_blank')}
+                        >
+                          {v.originalName || `凭证${idx + 1}`}
+                        </Button>
+                      ))}
+                    </Space>
+                  </div>
+                )
+              }
+              return null
+            })()}
+
             {detailData.auto_reason && (
               <Alert
                 message="系统自动判定"
@@ -336,7 +428,7 @@ const ComplaintList = () => {
                   </Descriptions.Item>
                   <Descriptions.Item label="赔偿金额">
                     <span style={{ color: '#f5222d', fontWeight: 500 }}>
-                      ¥{detailData.final_compensation_amount?.toLocaleString() || 0}
+                      ¥{detailData.final_compensation_amount != null ? detailData.final_compensation_amount.toLocaleString() : 0}
                     </span>
                   </Descriptions.Item>
                   <Descriptions.Item label="赔偿方案" span={2}>{detailData.final_compensation_plan || '-'}</Descriptions.Item>
@@ -347,32 +439,29 @@ const ComplaintList = () => {
                   </Descriptions.Item>
                 </Descriptions>
 
-                {detailData.voucher_urls && (
-                  <div style={{ marginTop: 16 }}>
-                    <p style={{ marginBottom: 8, fontWeight: 500 }}>处理凭证：</p>
-                    <Space wrap>
-                      {(() => {
-                        try {
-                          const urls = typeof detailData.voucher_urls === 'string' 
-                            ? JSON.parse(detailData.voucher_urls) 
-                            : detailData.voucher_urls
-                          return urls.map((url, idx) => (
+                {(() => {
+                  const handlerVouchers = parseVouchers(detailData.voucher_urls)
+                  if (handlerVouchers.length > 0) {
+                    return (
+                      <div style={{ marginTop: 16 }}>
+                        <p style={{ marginBottom: 8, fontWeight: 500 }}>处理凭证：</p>
+                        <Space wrap>
+                          {handlerVouchers.map((v, idx) => (
                             <Button
                               key={idx}
                               type="primary"
                               icon={<DownloadOutlined />}
-                              onClick={() => window.open(url, '_blank')}
+                              onClick={() => window.open(getFileUrl(v.url), '_blank')}
                             >
-                              下载凭证 {idx + 1}
+                              {v.originalName || `下载凭证 ${idx + 1}`}
                             </Button>
-                          ))
-                        } catch (e) {
-                          return null
-                        }
-                      })()}
-                    </Space>
-                  </div>
-                )}
+                          ))}
+                        </Space>
+                      </div>
+                    )
+                  }
+                  return null
+                })()}
               </>
             )}
           </>
@@ -441,16 +530,13 @@ const ComplaintList = () => {
           </Form.Item>
           <Form.Item label="上传处理凭证">
             <Upload
-              listType="picture-card"
               fileList={vouchers}
-              onChange={({ fileList }) => setVouchers(fileList)}
-              beforeUpload={() => false}
+              onChange={handleVoucherChange}
+              customRequest={({ onSuccess }) => onSuccess('ok')}
               multiple
+              accept="image/*,.pdf,.doc,.docx,.xls,.xlsx"
             >
-              <div>
-                <UploadOutlined style={{ fontSize: 24 }} />
-                <div style={{ marginTop: 8 }}>上传凭证</div>
-              </div>
+              <Button icon={<UploadOutlined />}>选择文件</Button>
             </Upload>
           </Form.Item>
           <Form.Item name="handlerRemark" label="处理备注">
