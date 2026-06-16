@@ -11,5 +11,6 @@ router.get('/workshop/capacity', authMiddleware, roleMiddleware(['production_sup
 
 router.post('/quality', authMiddleware, roleMiddleware(['quality_inspector']), productionController.createQualityInspection);
 router.get('/quality/list', authMiddleware, productionController.getQualityInspectionList);
+router.get('/recommend/:orderId', authMiddleware, roleMiddleware(['production_supervisor']), productionController.getProductionRecommend);
 
 module.exports = router;

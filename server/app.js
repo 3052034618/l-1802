@@ -5,7 +5,7 @@ const cors = require('cors');
 const http = require('http');
 const { Server } = require('socket.io');
 const config = require('./config');
-const { initNotification } = require('./services/notificationService');
+const { initNotification, batchCreateNotifications } = require('./services/notificationService');
 const cron = require('node-cron');
 const pool = require('./db');
 
@@ -15,6 +15,8 @@ const designRoutes = require('./routes/design');
 const productionRoutes = require('./routes/production');
 const notificationRoutes = require('./routes/notification');
 const complaintRoutes = require('./routes/complaint');
+const paymentRoutes = require('./routes/payment');
+const dimensionRoutes = require('./routes/dimensions');
 
 const app = express();
 const server = http.createServer(app);
@@ -40,6 +42,8 @@ app.use('/api/designs', designRoutes);
 app.use('/api/productions', productionRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/complaints', complaintRoutes);
+app.use('/api/payments', paymentRoutes);
+app.use('/api/dimensions', dimensionRoutes);
 
 app.get('/api/health', (req, res) => {
   res.json({ code: 200, message: '服务运行正常', data: { timestamp: new Date().toISOString() } });
@@ -63,29 +67,98 @@ cron.schedule('0 */2 * * *', async () => {
   
   try {
     const [inProgressOrders] = await pool.query(
-      "SELECT id, order_id, progress FROM production_orders WHERE status = 'in_progress'"
+      `SELECT po.id, po.order_id, po.progress, o.title, o.customer_id, o.designer_id
+       FROM production_orders po 
+       INNER JOIN orders o ON po.order_id = o.id 
+       WHERE po.status = 'in_progress'`
     );
 
-    for (const order of inProgressOrders) {
-      if (order.progress < 100) {
-        const newProgress = Math.min(order.progress + Math.floor(Math.random() * 5) + 1, 100);
+    for (const prod of inProgressOrders) {
+      if (prod.progress < 100) {
+        const progressIncrement = Math.floor(Math.random() * 5) + 1;
+        const newProgress = Math.min(prod.progress + progressIncrement, 100);
         
         await pool.query(
           'UPDATE production_orders SET progress = ? WHERE id = ?',
-          [newProgress, order.id]
+          [newProgress, prod.id]
         );
 
-        await pool.query(
+        const progressStages = [
+          { threshold: 10, desc: '板材下料工序已完成' },
+          { threshold: 25, desc: '封边工序已完成' },
+          { threshold: 40, desc: '打孔工序已完成' },
+          { threshold: 55, desc: '柜体组装进行中' },
+          { threshold: 70, desc: '柜体组装已完成，待喷漆' },
+          { threshold: 85, desc: '喷漆工序已完成，待组装' },
+          { threshold: 95, desc: '成品组装中，即将完成' },
+          { threshold: 100, desc: '生产全部完成，待质检' }
+        ];
+
+        let description = '生产进度正常推进中';
+        for (const stage of progressStages) {
+          if (newProgress >= stage.threshold && prod.progress < stage.threshold) {
+            description = stage.desc;
+            break;
+          }
+        }
+
+        const [logResult] = await pool.query(
           `INSERT INTO production_progress_logs (production_order_id, progress, status, description)
-           VALUES (?, ?, 'auto_update', '系统自动更新进度')`,
-          [order.id, newProgress]
+           VALUES (?, ?, 'auto_update', ?)`,
+          [prod.id, newProgress, description]
         );
+
+        const notifications = [];
+        
+        notifications.push({
+          userId: prod.customer_id,
+          type: 'production',
+          title: '生产进度更新',
+          content: `您的订单「${prod.title}」生产进度已更新至 ${newProgress}%。${description}`,
+          relatedType: 'order',
+          relatedId: prod.order_id
+        });
+
+        if (prod.designer_id) {
+          notifications.push({
+            userId: prod.designer_id,
+            type: 'production',
+            title: '生产进度更新',
+            content: `订单「${prod.title}」生产进度已更新至 ${newProgress}%。`,
+            relatedType: 'order',
+            relatedId: prod.order_id
+          });
+        }
 
         if (newProgress >= 100) {
           await pool.query(
             "UPDATE production_orders SET status = 'completed', end_time = NOW() WHERE id = ?",
-            [order.id]
+            [prod.id]
           );
+
+          await pool.query(
+            "UPDATE orders SET status = 'quality_check' WHERE id = ?",
+            [prod.order_id]
+          );
+
+          const [inspectors] = await pool.query(
+            "SELECT id FROM users WHERE role = 'quality_inspector' AND status = 'active'"
+          );
+
+          for (const inspector of inspectors) {
+            notifications.push({
+              userId: inspector.id,
+              type: 'quality',
+              title: '新质检任务',
+              content: `订单「${prod.title}」生产完成，待质检。`,
+              relatedType: 'order',
+              relatedId: prod.order_id
+            });
+          }
+        }
+
+        if (notifications.length > 0) {
+          await batchCreateNotifications(notifications);
         }
       }
     }

@@ -8,6 +8,10 @@ export const getComplaintList = (params) => {
   return request.get('/complaints', { params })
 }
 
+export const getComplaintDetail = (id) => {
+  return request.get(`/complaints/${id}`)
+}
+
 export const handleComplaint = (id, data) => {
   return request.put(`/complaints/${id}/handle`, data)
 }

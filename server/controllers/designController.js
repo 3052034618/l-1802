@@ -35,7 +35,7 @@ const submitDesignPlan = async (req, res) => {
     await generateMaterialList(orderId, result.insertId, connection);
 
     await connection.query(
-      "UPDATE orders SET status = 'design_confirmed' WHERE id = ?",
+      "UPDATE orders SET status = 'pending_confirmation' WHERE id = ?",
       [orderId]
     );
 
@@ -43,7 +43,7 @@ const submitDesignPlan = async (req, res) => {
       userId: order.customer_id,
       type: 'design',
       title: '设计方案已提交',
-      content: `设计师已提交「${order.title}」的设计方案，请及时查看并确认。`,
+      content: `设计师已提交「${order.title}」的设计方案和报价，请及时查看并确认。`,
       relatedType: 'order',
       relatedId: orderId
     });
@@ -191,6 +191,11 @@ const confirmDesignPlan = async (req, res) => {
         [id]
       );
 
+      await connection.query(
+        "UPDATE orders SET status = 'pending_payment' WHERE id = ?",
+        [plan.order_id]
+      );
+
       const [orders] = await connection.query('SELECT * FROM orders WHERE id = ?', [plan.order_id]);
       const order = orders[0];
 
@@ -198,35 +203,46 @@ const confirmDesignPlan = async (req, res) => {
         userId: plan.designer_id,
         type: 'design',
         title: '设计方案已通过',
-        content: `客户已确认通过「${order.title}」的设计方案。`,
+        content: `客户已确认通过「${order.title}」的设计方案，待客户支付。`,
         relatedType: 'order',
         relatedId: plan.order_id
       });
 
-      const [supervisors] = await connection.query(
-        "SELECT id FROM users WHERE role = 'production_supervisor' AND status = 'active'"
-      );
-
-      for (const supervisor of supervisors) {
-        await createNotification({
-          userId: supervisor.id,
-          type: 'order',
-          title: '新订单待排产',
-          content: `订单「${order.title}」设计已确认，待排产。`,
-          relatedType: 'order',
-          relatedId: plan.order_id
-        });
-      }
+      await createNotification({
+        userId: order.customer_id,
+        type: 'order',
+        title: '请完成支付',
+        content: `您已确认「${order.title}」的设计方案，请完成支付 ¥${order.total_price?.toLocaleString()} 元。`,
+        relatedType: 'order',
+        relatedId: plan.order_id
+      });
     } else {
       await connection.query(
         "UPDATE design_plans SET status = 'rejected' WHERE id = ?",
         [id]
       );
+
+      await connection.query(
+        "UPDATE orders SET status = 'designing' WHERE id = ?",
+        [plan.order_id]
+      );
+
+      const [orders] = await connection.query('SELECT * FROM orders WHERE id = ?', [plan.order_id]);
+      const order = orders[0];
+
+      await createNotification({
+        userId: plan.designer_id,
+        type: 'design',
+        title: '设计方案被驳回',
+        content: `客户驳回了「${order.title}」的设计方案，请修改后重新提交。`,
+        relatedType: 'order',
+        relatedId: plan.order_id
+      });
     }
 
     await connection.commit();
 
-    res.json(success(null, confirmed ? '方案已确认' : '方案已驳回'));
+    res.json(success(null, confirmed ? '方案已确认，待支付' : '方案已驳回'));
   } catch (err) {
     await connection.rollback();
     console.error('确认设计方案错误:', err);

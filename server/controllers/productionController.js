@@ -1,6 +1,6 @@
 const pool = require('../db');
 const { success, error, generateProductionNo, generateInspectionNo } = require('../utils/response');
-const { createNotification } = require('../services/notificationService');
+const { createNotification, batchCreateNotifications } = require('../services/notificationService');
 const dayjs = require('dayjs');
 
 const scheduleProduction = async (req, res) => {
@@ -8,7 +8,7 @@ const scheduleProduction = async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    const { orderId, productionLine, scheduleDate } = req.body;
+    const { orderId, productionLine, scheduleDate, remark, recommendReason, recommendData } = req.body;
     const supervisorId = req.user.id;
 
     const [orders] = await connection.query('SELECT * FROM orders WHERE id = ?', [orderId]);
@@ -17,6 +17,10 @@ const scheduleProduction = async (req, res) => {
     }
 
     const order = orders[0];
+
+    if (order.status !== 'ready_for_production') {
+      return res.json(error('订单状态不正确，只有已支付的订单才能安排生产'));
+    }
 
     const [existingProduction] = await connection.query(
       'SELECT id FROM production_orders WHERE order_id = ? AND status != "completed"',
@@ -29,9 +33,10 @@ const scheduleProduction = async (req, res) => {
     const productionNo = generateProductionNo();
 
     const [result] = await connection.query(
-      `INSERT INTO production_orders (order_id, production_no, production_line, schedule_date, status, progress, supervisor_id)
-       VALUES (?, ?, ?, ?, 'pending', 0, ?)`,
-      [orderId, productionNo, productionLine || null, scheduleDate || null, supervisorId]
+      `INSERT INTO production_orders (order_id, production_no, production_line, schedule_date, status, progress, supervisor_id, remark, recommend_reason, recommend_data)
+       VALUES (?, ?, ?, ?, 'in_progress', 0, ?, ?, ?, ?)`,
+      [orderId, productionNo, productionLine || null, scheduleDate || null, supervisorId,
+       remark || null, recommendReason || null, recommendData ? JSON.stringify(recommendData) : null]
     );
 
     const productionOrderId = result.insertId;
@@ -41,25 +46,35 @@ const scheduleProduction = async (req, res) => {
       [orderId]
     );
 
-    await createNotification({
-      userId: order.customer_id,
-      type: 'production',
-      title: '订单已开始生产',
-      content: `您的订单「${order.title}」已安排生产，预计${scheduleDate || '尽快'}开工。`,
-      relatedType: 'order',
-      relatedId: orderId
-    });
+    await connection.query(
+      `INSERT INTO production_progress_logs (production_order_id, progress, status, description, recorded_by)
+       VALUES (?, 0, 'pending', '生产任务已创建，待开工', ?)`,
+      [productionOrderId, supervisorId]
+    );
+
+    const notifications = [
+      {
+        userId: order.customer_id,
+        type: 'production',
+        title: '订单已开始生产',
+        content: `您的订单「${order.title}」已安排生产，预计${scheduleDate || '尽快'}开工，产线：${productionLine}。`,
+        relatedType: 'order',
+        relatedId: orderId
+      }
+    ];
 
     if (order.designer_id) {
-      await createNotification({
+      notifications.push({
         userId: order.designer_id,
         type: 'production',
         title: '订单进入生产',
-        content: `订单「${order.title}」已进入生产阶段。`,
+        content: `订单「${order.title}」已进入生产阶段，产线：${productionLine}。`,
         relatedType: 'order',
         relatedId: orderId
       });
     }
+
+    await batchCreateNotifications(notifications);
 
     await connection.commit();
 
@@ -261,15 +276,57 @@ const createQualityInspection = async (req, res) => {
   try {
     await connection.beginTransaction();
 
-    const { orderId, productionOrderId, status, overallScore, inspectionItems, photos, deviationData, remark } = req.body;
+    const { orderId, productionOrderId, status, overallScore, inspectionItems, photos, measuredDimensions, remark } = req.body;
     const inspectorId = req.user.id;
+
+    const [designDimensions] = await connection.query(
+      'SELECT * FROM design_dimensions WHERE order_id = ?',
+      [orderId]
+    );
+
+    let deviationData = [];
+    let hasExceededDeviation = false;
+    let exceededItems = [];
+
+    if (measuredDimensions && measuredDimensions.length > 0 && designDimensions.length > 0) {
+      measuredDimensions.forEach(measured => {
+        const design = designDimensions.find(d => d.id === measured.dimensionId);
+        if (design) {
+          const deviation = Math.abs(measured.measuredValue - design.design_value);
+          const isExceeded = deviation > design.tolerance;
+          
+          deviationData.push({
+            dimensionId: design.id,
+            itemName: design.item_name,
+            partName: design.part_name,
+            dimensionType: design.dimension_type,
+            designValue: design.design_value,
+            measuredValue: measured.measuredValue,
+            tolerance: design.tolerance,
+            deviation: deviation,
+            unit: design.unit,
+            isExceeded: isExceeded
+          });
+
+          if (isExceeded) {
+            hasExceededDeviation = true;
+            exceededItems.push(`${design.item_name} ${design.part_name || ''} ${design.dimension_type}: 设计值${design.design_value}${design.unit}, 实测${measured.measuredValue}${design.unit}, 偏差${deviation}${design.unit}, 超过公差${design.tolerance}${design.unit}`);
+          }
+        }
+      });
+    }
+
+    let finalStatus = status;
+    if (hasExceededDeviation && status !== 'rework') {
+      finalStatus = 'rework';
+    }
 
     const inspectionNo = generateInspectionNo();
 
     const [result] = await connection.query(
       `INSERT INTO quality_inspections (order_id, production_order_id, inspector_id, inspection_no, status, overall_score, inspection_items, photos, deviation_data, remark, inspected_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())`,
-      [orderId, productionOrderId, inspectorId, inspectionNo, status || 'pending',
+      [orderId, productionOrderId, inspectorId, inspectionNo, finalStatus,
        overallScore || null,
        inspectionItems ? JSON.stringify(inspectionItems) : null,
        photos ? JSON.stringify(photos) : null,
@@ -279,7 +336,10 @@ const createQualityInspection = async (req, res) => {
 
     const inspectionId = result.insertId;
 
-    if (status === 'passed') {
+    const [orders] = await connection.query('SELECT * FROM orders WHERE id = ?', [orderId]);
+    const order = orders[0];
+
+    if (finalStatus === 'passed') {
       await connection.query(
         "UPDATE orders SET status = 'completed' WHERE id = ?",
         [orderId]
@@ -289,44 +349,93 @@ const createQualityInspection = async (req, res) => {
         "UPDATE production_orders SET status = 'completed' WHERE id = ?",
         [productionOrderId]
       );
-    } else if (status === 'failed' || status === 'rework') {
+    } else if (finalStatus === 'failed' || finalStatus === 'rework') {
+      const [qualityInspections] = await connection.query(
+        'SELECT COUNT(*) as count FROM quality_inspections WHERE order_id = ? AND status IN ("failed", "rework")',
+        [orderId]
+      );
+      const reworkCount = qualityInspections[0].count;
+
       await connection.query(
         "UPDATE orders SET status = 'rework' WHERE id = ?",
         [orderId]
       );
 
       await connection.query(
-        "UPDATE production_orders SET status = 'quality_failed' WHERE id = ?",
+        `UPDATE production_orders 
+         SET status = 'quality_failed', progress = 0 
+         WHERE id = ?`,
         [productionOrderId]
+      );
+
+      await connection.query(
+        'UPDATE quality_inspections SET rework_count = ? WHERE id = ?',
+        [reworkCount, inspectionId]
+      );
+
+      await connection.query(
+        `INSERT INTO production_progress_logs (production_order_id, progress, status, description, recorded_by)
+         VALUES (?, 0, 'rework', ? , ?)`,
+        [productionOrderId, `质检不合格，需要返工。${exceededItems.length > 0 ? '问题：' + exceededItems.slice(0, 2).join('；') : ''}`, inspectorId]
       );
     }
 
-    const [orders] = await connection.query('SELECT * FROM orders WHERE id = ?', [orderId]);
-    const order = orders[0];
+    const notifications = [];
+    const statusText = finalStatus === 'passed' ? '通过' : '未通过，需要返工';
+    let content = `您的订单「${order.title}」质检${statusText}。`;
+    
+    if (hasExceededDeviation) {
+      content += ` 发现${exceededItems.length}项尺寸偏差超过阈值。`;
+    }
 
-    await createNotification({
+    notifications.push({
       userId: order.customer_id,
       type: 'quality',
       title: '质检结果通知',
-      content: `您的订单「${order.title}」质检${status === 'passed' ? '通过' : '未通过，需要返工'}。`,
+      content: content,
       relatedType: 'order',
       relatedId: orderId
     });
 
     if (order.designer_id) {
-      await createNotification({
+      notifications.push({
         userId: order.designer_id,
         type: 'quality',
         title: '质检结果通知',
-        content: `订单「${order.title}」质检${status === 'passed' ? '通过' : '未通过'}。`,
+        content: `订单「${order.title}」质检${statusText}。${hasExceededDeviation ? '请配合调整设计。' : ''}`,
         relatedType: 'order',
         relatedId: orderId
       });
     }
 
+    const [supervisors] = await connection.query(
+      "SELECT id FROM users WHERE role = 'production_supervisor' AND status = 'active'"
+    );
+
+    for (const supervisor of supervisors) {
+      notifications.push({
+        userId: supervisor.id,
+        type: 'quality',
+        title: '质检结果通知',
+        content: `订单「${order.title}」质检${statusText}。${hasExceededDeviation ? '请安排返工。' : ''}`,
+        relatedType: 'order',
+        relatedId: orderId
+      });
+    }
+
+    await batchCreateNotifications(notifications);
+
     await connection.commit();
 
-    res.json(success({ inspectionId, inspectionNo }, '质检记录创建成功'));
+    res.json(success({ 
+      inspectionId, 
+      inspectionNo, 
+      finalStatus,
+      hasExceededDeviation,
+      exceededItems 
+    }, hasExceededDeviation && status !== 'rework' 
+      ? '检测到尺寸偏差超标，系统自动判定为返工' 
+      : '质检记录创建成功'));
   } catch (err) {
     await connection.rollback();
     console.error('创建质检记录错误:', err);
@@ -418,6 +527,128 @@ const getWorkshopCapacity = async (req, res) => {
   }
 };
 
+const getProductionRecommend = async (req, res) => {
+  try {
+    const { orderId } = req.params;
+
+    const [orders] = await pool.query('SELECT * FROM orders WHERE id = ?', [orderId]);
+    if (orders.length === 0) {
+      return res.json(error('订单不存在', 404));
+    }
+
+    const order = orders[0];
+
+    const [materialItems] = await pool.query(`
+      SELECT mi.* FROM material_items mi
+      INNER JOIN material_lists ml ON mi.material_list_id = ml.id
+      WHERE ml.order_id = ?
+      ORDER BY mi.category, mi.sort_order
+    `, [orderId]);
+
+    const lines = [
+      { id: 'A线-木工车间', name: 'A线-木工车间', capacity: 10, suitableCategories: ['板材'], priority: 1 },
+      { id: 'B线-木工车间', name: 'B线-木工车间', capacity: 8, suitableCategories: ['板材'], priority: 2 },
+      { id: 'C线-喷漆车间', name: 'C线-喷漆车间', capacity: 6, suitableCategories: ['涂料'], priority: 1 },
+      { id: 'D线-组装车间', name: 'D线-组装车间', capacity: 12, suitableCategories: ['板材', '五金', '石材'], priority: 1 }
+    ];
+
+    const today = dayjs();
+    const dateOrders = {};
+    for (let i = 0; i < 7; i++) {
+      const dateStr = today.add(i, 'day').format('YYYY-MM-DD');
+      const [dayOrders] = await pool.query(
+        `SELECT production_line, COUNT(*) as count 
+         FROM production_orders 
+         WHERE schedule_date = ? 
+         GROUP BY production_line`,
+        [dateStr]
+      );
+      dateOrders[dateStr] = {};
+      dayOrders.forEach(d => {
+        dateOrders[dateStr][d.production_line] = d.count;
+      });
+    }
+
+    const categories = [...new Set(materialItems.map(m => m.category))];
+
+    const lineScores = lines.map(line => {
+      const matchCount = categories.filter(c => line.suitableCategories.includes(c)).length;
+      let bestDate = null;
+      let minLoad = Infinity;
+
+      for (let i = 0; i < 7; i++) {
+        const dateStr = today.add(i, 'day').format('YYYY-MM-DD');
+        const currentLoad = dateOrders[dateStr]?.[line.id] || 0;
+        const available = line.capacity - currentLoad;
+        
+        if (available > 0 && currentLoad < minLoad) {
+          minLoad = currentLoad;
+          bestDate = dateStr;
+        }
+      }
+
+      const workload = bestDate ? (dateOrders[bestDate]?.[line.id] || 0) : line.capacity;
+      const loadRate = workload / line.capacity;
+      const score = (matchCount / Math.max(categories.length, 1)) * 50 + (1 - loadRate) * 30 + (line.priority === 1 ? 20 : 10);
+
+      return {
+        ...line,
+        score: Math.round(score * 100) / 100,
+        currentWorkload: workload,
+        availableCapacity: line.capacity - workload,
+        loadRate: Math.round(loadRate * 100),
+        bestDate,
+        isFull: workload >= line.capacity
+      };
+    });
+
+    lineScores.sort((a, b) => b.score - a.score);
+
+    const recommendedLine = lineScores.find(l => !l.isFull) || lineScores[0];
+    const recommendedDate = recommendedLine.bestDate || today.add(1, 'day').format('YYYY-MM-DD');
+
+    const reasons = [];
+    reasons.push(`订单主要物料类型：${categories.join('、') || '未知'}`);
+    reasons.push(`推荐产线「${recommendedLine.name}」：匹配度${Math.round((categories.filter(c => recommendedLine.suitableCategories.includes(c)).length / Math.max(categories.length, 1)) * 100)}%，当前负载${recommendedLine.loadRate}%`);
+    reasons.push(`推荐排产日期：${recommendedDate}（最近7天中该产线负载最低）`);
+    reasons.push(`预计物料总量：${materialItems.reduce((sum, m) => sum + m.quantity, 0).toFixed(2)} 单位`);
+
+    const otherOptions = lineScores
+      .filter(l => l.id !== recommendedLine.id && !l.isFull)
+      .slice(0, 2)
+      .map(l => ({
+        id: l.id,
+        name: l.name,
+        score: l.score,
+        loadRate: l.loadRate,
+        bestDate: l.bestDate,
+        reason: `匹配度${Math.round((categories.filter(c => l.suitableCategories.includes(c)).length / Math.max(categories.length, 1)) * 100)}%，负载${l.loadRate}%`
+      }));
+
+    const result = {
+      recommended: {
+        line: recommendedLine.id,
+        lineName: recommendedLine.name,
+        date: recommendedDate,
+        score: recommendedLine.score
+      },
+      reasons,
+      allLines: lineScores,
+      otherOptions,
+      materialSummary: {
+        totalItems: materialItems.length,
+        categories,
+        totalQuantity: Math.round(materialItems.reduce((sum, m) => sum + m.quantity, 0) * 100) / 100
+      }
+    };
+
+    res.json(success(result));
+  } catch (err) {
+    console.error('获取排产推荐错误:', err);
+    res.json(error('获取排产推荐失败'));
+  }
+};
+
 module.exports = {
   scheduleProduction,
   updateProductionProgress,
@@ -425,5 +656,6 @@ module.exports = {
   getProductionOrderDetail,
   createQualityInspection,
   getQualityInspectionList,
-  getWorkshopCapacity
+  getWorkshopCapacity,
+  getProductionRecommend
 };

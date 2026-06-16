@@ -20,6 +20,10 @@ export const getWorkshopCapacity = () => {
   return request.get('/productions/workshop/capacity')
 }
 
+export const getProductionRecommend = (orderId) => {
+  return request.get(`/productions/recommend/${orderId}`)
+}
+
 export const createQualityInspection = (data) => {
   return request.post('/productions/quality', data)
 }

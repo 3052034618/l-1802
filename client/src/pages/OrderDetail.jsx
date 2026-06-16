@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react'
 import {
   Card, Descriptions, Tag, Button, Space, Steps, Divider,
-  List, Table, Modal, Form, Input, Select, Upload, Progress, message
+  List, Table, Modal, Form, Input, Select, Upload, Progress, message,
+  DatePicker, Alert, Row, Col
 } from 'antd'
 import {
   ArrowLeftOutlined, EditOutlined, UploadOutlined,
@@ -11,8 +12,10 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useUserStore } from '../store'
 import { getOrderDetail, updateOrderStatus } from '../api/order'
 import { submitDesignPlan, confirmDesignPlan } from '../api/design'
-import { scheduleProduction, createQualityInspection } from '../api/production'
+import { scheduleProduction, createQualityInspection, getProductionRecommend } from '../api/production'
 import { createComplaint } from '../api/complaint'
+import { processPayment, getPaymentRecord } from '../api/payment'
+import { getDesignDimensions } from '../api/dimension'
 import dayjs from 'dayjs'
 
 const { Step } = Steps
@@ -22,7 +25,10 @@ const { Option } = Select
 const statusColors = {
   pending_designer: 'orange',
   designing: 'blue',
-  design_confirmed: 'cyan',
+  pending_confirmation: 'cyan',
+  design_confirmed: 'geekblue',
+  pending_payment: 'gold',
+  ready_for_production: 'purple',
   production: 'purple',
   quality_check: 'magenta',
   completed: 'green',
@@ -33,7 +39,10 @@ const statusColors = {
 const statusText = {
   pending_designer: '待分配设计师',
   designing: '设计中',
+  pending_confirmation: '待客户确认',
   design_confirmed: '设计已确认',
+  pending_payment: '待支付',
+  ready_for_production: '待生产排产',
   production: '生产中',
   quality_check: '质检中',
   completed: '已完成',
@@ -56,10 +65,16 @@ const OrderDetail = () => {
   const [productionModalVisible, setProductionModalVisible] = useState(false)
   const [qualityModalVisible, setQualityModalVisible] = useState(false)
   const [complaintModalVisible, setComplaintModalVisible] = useState(false)
+  const [paymentModalVisible, setPaymentModalVisible] = useState(false)
+  const [payments, setPayments] = useState([])
+  const [recommendData, setRecommendData] = useState(null)
+  const [designDimensions, setDesignDimensions] = useState([])
+  const [photos, setPhotos] = useState([])
   const [form] = Form.useForm()
   const [productionForm] = Form.useForm()
   const [qualityForm] = Form.useForm()
   const [complaintForm] = Form.useForm()
+  const [paymentForm] = Form.useForm()
 
   useEffect(() => {
     fetchDetail()
@@ -68,15 +83,74 @@ const OrderDetail = () => {
   const fetchDetail = async () => {
     setLoading(true)
     try {
-      const res = await getOrderDetail(id)
-      setOrder(res.order)
-      setDesignPlans(res.designPlans || [])
-      setMaterialList(res.materialList)
-      setMaterialItems(res.materialItems || [])
-      setProductionOrders(res.productionOrders || [])
-      setQualityInspections(res.qualityInspections || [])
+      const [orderRes, paymentRes] = await Promise.all([
+        getOrderDetail(id),
+        getPaymentRecord(id).catch(() => ({ list: [] }))
+      ])
+      setOrder(orderRes.order)
+      setDesignPlans(orderRes.designPlans || [])
+      setMaterialList(orderRes.materialList)
+      setMaterialItems(orderRes.materialItems || [])
+      setProductionOrders(orderRes.productionOrders || [])
+      setQualityInspections(orderRes.qualityInspections || [])
+      setPayments(Array.isArray(paymentRes) ? paymentRes : [])
     } catch (err) {
       console.error('获取订单详情失败:', err)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handlePayment = async (values) => {
+    try {
+      await processPayment({
+        orderId: id,
+        amount: order.total_price,
+        paymentMethod: values.paymentMethod
+      })
+      message.success('支付成功')
+      setPaymentModalVisible(false)
+      paymentForm.resetFields()
+      fetchDetail()
+    } catch (err) {
+      console.error('支付失败:', err)
+    }
+  }
+
+  const openProductionModal = async () => {
+    try {
+      setLoading(true)
+      const recommend = await getProductionRecommend(id)
+      setRecommendData(recommend)
+      
+      if (recommend?.recommended) {
+        productionForm.setFieldsValue({
+          productionLine: recommend.recommended.line,
+          scheduleDate: dayjs(recommend.recommended.date)
+        })
+      }
+      
+      setProductionModalVisible(true)
+    } catch (err) {
+      console.error('获取排产推荐失败:', err)
+      message.error('获取排产推荐失败')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const openQualityModal = async () => {
+    try {
+      setLoading(true)
+      const dims = await getDesignDimensions(id)
+      setDesignDimensions(dims || [])
+      setPhotos([])
+      qualityForm.resetFields()
+      setQualityModalVisible(true)
+    } catch (err) {
+      console.error('获取设计尺寸失败:', err)
+      setDesignDimensions([])
+      setQualityModalVisible(true)
     } finally {
       setLoading(false)
     }
@@ -86,6 +160,7 @@ const OrderDetail = () => {
     const steps = [
       { title: '提交订单', description: '客户提交需求' },
       { title: '方案设计', description: '设计师设计方案' },
+      { title: '确认支付', description: '客户确认并支付' },
       { title: '生产制造', description: '工厂生产加工' },
       { title: '质量检验', description: '成品质检' },
       { title: '交付完成', description: '订单完成' }
@@ -94,10 +169,11 @@ const OrderDetail = () => {
     let currentStep = 0
     const status = order?.status
     if (status === 'pending_designer') currentStep = 0
-    else if (['designing', 'design_confirmed'].includes(status)) currentStep = 1
-    else if (['production', 'rework'].includes(status)) currentStep = 2
-    else if (status === 'quality_check') currentStep = 3
-    else if (status === 'completed') currentStep = 4
+    else if (['designing', 'pending_confirmation'].includes(status)) currentStep = 1
+    else if (['design_confirmed', 'pending_payment', 'ready_for_production'].includes(status)) currentStep = 2
+    else if (['production', 'rework'].includes(status)) currentStep = 3
+    else if (status === 'quality_check') currentStep = 4
+    else if (status === 'completed') currentStep = 5
 
     return { steps, currentStep }
   }
@@ -129,13 +205,19 @@ const OrderDetail = () => {
 
   const handleScheduleProduction = async (values) => {
     try {
-      await scheduleProduction({
+      const submitData = {
         orderId: id,
-        ...values
-      })
+        productionLine: values.productionLine,
+        scheduleDate: values.scheduleDate ? dayjs(values.scheduleDate).format('YYYY-MM-DD') : null,
+        remark: values.remark,
+        recommendReason: recommendData?.reasons?.join('\n'),
+        recommendData: recommendData
+      }
+      await scheduleProduction(submitData)
       message.success('生产排产成功')
       setProductionModalVisible(false)
       productionForm.resetFields()
+      setRecommendData(null)
       fetchDetail()
     } catch (err) {
       console.error('生产排产失败:', err)
@@ -144,14 +226,31 @@ const OrderDetail = () => {
 
   const handleQualityInspection = async (values) => {
     try {
-      await createQualityInspection({
+      const measuredDimensions = designDimensions.map(dim => ({
+        dimensionId: dim.id,
+        measuredValue: parseFloat(values[`dim_${dim.id}`])
+      })).filter(d => !isNaN(d.measuredValue))
+
+      const photoUrls = photos.map(p => p.url || p.name)
+
+      const res = await createQualityInspection({
         orderId: id,
         productionOrderId: productionOrders[0]?.id,
-        ...values
+        ...values,
+        photos: photoUrls,
+        measuredDimensions
       })
-      message.success('质检记录提交成功')
+
+      if (res.hasExceededDeviation) {
+        message.warning(`检测到${res.exceededItems.length}项尺寸偏差超标，系统已自动判定为返工`)
+      } else {
+        message.success('质检记录提交成功')
+      }
+
       setQualityModalVisible(false)
       qualityForm.resetFields()
+      setPhotos([])
+      setDesignDimensions([])
       fetchDetail()
     } catch (err) {
       console.error('提交质检记录失败:', err)
@@ -216,13 +315,18 @@ const OrderDetail = () => {
                 提交设计方案
               </Button>
             )}
-            {user?.role === 'production_supervisor' && order.status === 'design_confirmed' && (
-              <Button type="primary" onClick={() => setProductionModalVisible(true)}>
+            {user?.role === 'customer' && order.status === 'pending_payment' && (
+              <Button type="primary" onClick={() => setPaymentModalVisible(true)}>
+                立即支付
+              </Button>
+            )}
+            {user?.role === 'production_supervisor' && order.status === 'ready_for_production' && (
+              <Button type="primary" onClick={() => openProductionModal()}>
                 安排生产
               </Button>
             )}
             {user?.role === 'quality_inspector' && order.status === 'quality_check' && (
-              <Button type="primary" onClick={() => setQualityModalVisible(true)}>
+              <Button type="primary" onClick={openQualityModal}>
                 质量检测
               </Button>
             )}
@@ -420,24 +524,110 @@ const OrderDetail = () => {
       <Modal
         title="生产排产"
         open={productionModalVisible}
-        onCancel={() => setProductionModalVisible(false)}
+        onCancel={() => {
+          setProductionModalVisible(false)
+          setRecommendData(null)
+        }}
         footer={null}
-        width={500}
+        width={650}
       >
+        {recommendData && (
+          <>
+            <Alert
+              message="系统智能推荐"
+              description={
+                <div>
+                  <p style={{ marginBottom: 4 }}>
+                    推荐产线：<strong>{recommendData.recommended?.lineName}</strong>
+                    <Tag color="green" style={{ marginLeft: 8 }}>
+                      匹配度 {recommendData.recommended?.score} 分
+                    </Tag>
+                  </p>
+                  <p style={{ marginBottom: 4 }}>
+                    推荐日期：<strong>{recommendData.recommended?.date}</strong>
+                  </p>
+                  <Divider style={{ margin: '8px 0' }} />
+                  <p style={{ fontSize: 12, color: '#666', marginBottom: 4 }}>推荐依据：</p>
+                  <ul style={{ paddingLeft: 16, fontSize: 12, color: '#666' }}>
+                    {recommendData.reasons?.map((reason, idx) => (
+                      <li key={idx} style={{ marginBottom: 2 }}>{reason}</li>
+                    ))}
+                  </ul>
+                  {recommendData.otherOptions?.length > 0 && (
+                    <>
+                      <p style={{ fontSize: 12, color: '#666', marginTop: 8, marginBottom: 4 }}>其他可选方案：</p>
+                      <ul style={{ paddingLeft: 16, fontSize: 12, color: '#999' }}>
+                        {recommendData.otherOptions.map((opt, idx) => (
+                          <li key={idx}>{opt.name} - {opt.reason}，推荐日期：{opt.bestDate}</li>
+                        ))}
+                      </ul>
+                    </>
+                  )}
+                </div>
+              }
+              type="info"
+              showIcon
+              style={{ marginBottom: 16 }}
+            />
+            <Divider orientation="left" style={{ margin: '12px 0', fontSize: 13 }}>各产线负载情况</Divider>
+            <Row gutter={[8, 8]} style={{ marginBottom: 16 }}>
+              {recommendData.allLines?.map((line) => (
+                <Col span={12} key={line.id}>
+                  <Card size="small" style={{ 
+                    opacity: line.isFull ? 0.5 : 1,
+                    border: recommendData.recommended?.line === line.id ? '1px solid #1677ff' : '1px solid #f0f0f0'
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+                      <span style={{ fontSize: 12, fontWeight: 500 }}>{line.name}</span>
+                      <Tag color={line.isFull ? 'red' : line.loadRate > 70 ? 'orange' : 'green'} style={{ margin: 0 }}>
+                        {line.isFull ? '已满' : `${line.loadRate}%`}
+                      </Tag>
+                    </div>
+                    <Progress percent={line.loadRate} size="small" status={line.isFull ? 'exception' : 'active'} />
+                    <div style={{ fontSize: 11, color: '#999', marginTop: 4 }}>
+                      {line.currentWorkload}/{line.capacity} 单
+                    </div>
+                  </Card>
+                </Col>
+              ))}
+            </Row>
+          </>
+        )}
         <Form form={productionForm} layout="vertical" onFinish={handleScheduleProduction}>
           <Form.Item name="productionLine" label="产线" rules={[{ required: true, message: '请选择产线' }]}>
             <Select placeholder="请选择产线">
-              <Option value="A线-木工车间">A线-木工车间</Option>
-              <Option value="B线-木工车间">B线-木工车间</Option>
-              <Option value="C线-喷漆车间">C线-喷漆车间</Option>
-              <Option value="D线-组装车间">D线-组装车间</Option>
+              {recommendData?.allLines?.map((line) => (
+                <Option 
+                  key={line.id} 
+                  value={line.id} 
+                  disabled={line.isFull}
+                  label={
+                    <span>
+                      {line.name}
+                      <Tag color={line.isFull ? 'red' : 'green'} style={{ marginLeft: 8 }}>
+                        {line.isFull ? '产能已满' : `负载${line.loadRate}%`}
+                      </Tag>
+                    </span>
+                  }
+                >
+                  {line.name} ({line.isFull ? '产能已满' : `负载${line.loadRate}%`})
+                </Option>
+              ))}
             </Select>
           </Form.Item>
           <Form.Item name="scheduleDate" label="排产日期" rules={[{ required: true, message: '请选择排产日期' }]}>
-            <DatePicker style={{ width: '100%' }} />
+            <DatePicker 
+              style={{ width: '100%' }} 
+              minDate={dayjs()}
+              format="YYYY-MM-DD"
+              placeholder="请选择排产日期"
+            />
+          </Form.Item>
+          <Form.Item name="remark" label="备注">
+            <TextArea rows={2} placeholder="请输入备注（可选）" />
           </Form.Item>
           <Form.Item>
-            <Button type="primary" htmlType="submit" block>
+            <Button type="primary" htmlType="submit" block loading={loading}>
               确认排产
             </Button>
           </Form.Item>
@@ -447,30 +637,187 @@ const OrderDetail = () => {
       <Modal
         title="质量检测"
         open={qualityModalVisible}
-        onCancel={() => setQualityModalVisible(false)}
+        onCancel={() => {
+          setQualityModalVisible(false)
+          qualityForm.resetFields()
+          setPhotos([])
+        }}
         footer={null}
-        width={600}
+        width={800}
       >
         <Form form={qualityForm} layout="vertical" onFinish={handleQualityInspection}>
-          <Form.Item name="status" label="质检结果" rules={[{ required: true, message: '请选择质检结果' }]}>
-            <Select placeholder="请选择质检结果">
-              <Option value="passed">合格</Option>
-              <Option value="failed">不合格</Option>
-              <Option value="rework">返工</Option>
-            </Select>
+          <Divider orientation="left" style={{ margin: '12px 0' }}>
+            <span style={{ fontSize: 14, fontWeight: 500 }}>成品照片</span>
+          </Divider>
+          <Form.Item label="上传成品照片">
+            <Upload
+              listType="picture-card"
+              fileList={photos}
+              onChange={({ fileList }) => setPhotos(fileList)}
+              beforeUpload={() => false}
+              multiple
+            >
+              <div>
+                <CameraOutlined style={{ fontSize: 24 }} />
+                <div style={{ marginTop: 8 }}>上传照片</div>
+              </div>
+            </Upload>
           </Form.Item>
-          <Form.Item name="overallScore" label="综合评分">
-            <Input type="number" placeholder="0-100分" />
-          </Form.Item>
+
+          {designDimensions.length > 0 ? (
+            <>
+              <Divider orientation="left" style={{ margin: '12px 0' }}>
+                <span style={{ fontSize: 14, fontWeight: 500 }}>关键尺寸检测</span>
+              </Divider>
+              <Alert
+                message="系统将自动比对实测值与设计值，偏差超过公差的将被标记"
+                type="info"
+                showIcon
+                style={{ marginBottom: 16 }}
+              />
+              <Table
+                size="small"
+                dataSource={designDimensions}
+                rowKey="id"
+                pagination={false}
+                columns={[
+                  {
+                    title: '部位',
+                    dataIndex: 'item_name',
+                    key: 'item_name',
+                    render: (text, record) => (
+                      <div>
+                        <div>{text}</div>
+                        {record.part_name && (
+                          <div style={{ color: '#999', fontSize: 12 }}>{record.part_name}</div>
+                        )}
+                      </div>
+                    )
+                  },
+                  {
+                    title: '类型',
+                    dataIndex: 'dimension_type',
+                    key: 'dimension_type',
+                    width: 80
+                  },
+                  {
+                    title: '设计值',
+                    key: 'design',
+                    width: 100,
+                    render: (_, record) => (
+                      <span>
+                        {record.design_value} {record.unit}
+                      </span>
+                    )
+                  },
+                  {
+                    title: '公差±',
+                    key: 'tolerance',
+                    width: 80,
+                    render: (_, record) => (
+                      <span style={{ color: '#f5222d' }}>
+                        {record.tolerance} {record.unit}
+                      </span>
+                    )
+                  },
+                  {
+                    title: '实测值',
+                    key: 'measured',
+                    width: 120,
+                    render: (_, record) => (
+                      <Form.Item
+                        name={`dim_${record.id}`}
+                        style={{ margin: 0 }}
+                        rules={[{ required: true, message: '请输入实测值' }]}
+                      >
+                        <Input
+                          type="number"
+                          step="0.1"
+                          placeholder={`${record.unit}`}
+                          suffix={record.unit}
+                        />
+                      </Form.Item>
+                    )
+                  }
+                ]}
+              />
+            </>
+          ) : (
+            <Alert
+              message="未找到该订单的设计尺寸数据，请手动填写质检结果"
+              type="warning"
+              showIcon
+              style={{ marginBottom: 16 }}
+            />
+          )}
+
+          <Divider orientation="left" style={{ margin: '12px 0' }}>
+            <span style={{ fontSize: 14, fontWeight: 500 }}>质检结论</span>
+          </Divider>
+          <Row gutter={16}>
+            <Col span={12}>
+              <Form.Item name="status" label="质检结果" rules={[{ required: true, message: '请选择质检结果' }]}>
+                <Select placeholder="请选择质检结果">
+                  <Option value="passed">合格</Option>
+                  <Option value="failed">不合格</Option>
+                  <Option value="rework">返工</Option>
+                </Select>
+              </Form.Item>
+            </Col>
+            <Col span={12}>
+              <Form.Item name="overallScore" label="综合评分">
+                <Input type="number" placeholder="0-100分" suffix="分" />
+              </Form.Item>
+            </Col>
+          </Row>
           <Form.Item name="remark" label="备注说明">
             <TextArea rows={3} placeholder="请输入质检备注" />
           </Form.Item>
-          <Form.Item>
-            <Button type="primary" htmlType="submit" block>
+          <Form.Item style={{ marginBottom: 0 }}>
+            <Button type="primary" htmlType="submit" block loading={loading}>
               提交质检结果
             </Button>
           </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title="订单支付"
+        open={paymentModalVisible}
+        onCancel={() => setPaymentModalVisible(false)}
+        footer={null}
+        width={500}
+      >
+        {order && (
+          <>
+            <Card style={{ marginBottom: 16, background: '#f5f5f5' }}>
+              <div style={{ textAlign: 'center' }}>
+                <p style={{ color: '#666', marginBottom: 8 }}>订单金额</p>
+                <p style={{ fontSize: 32, fontWeight: 'bold', color: '#f5222d', margin: 0 }}>
+                  ¥{order.total_price?.toLocaleString()}
+                </p>
+                <p style={{ color: '#999', fontSize: 12, marginTop: 8 }}>
+                  订单号：{order.order_no}
+                </p>
+              </div>
+            </Card>
+            <Form form={paymentForm} layout="vertical" onFinish={handlePayment}>
+              <Form.Item name="paymentMethod" label="支付方式" rules={[{ required: true, message: '请选择支付方式' }]}>
+                <Select placeholder="请选择支付方式">
+                  <Option value="alipay">支付宝</Option>
+                  <Option value="wechat">微信支付</Option>
+                  <Option value="bank">银行转账</Option>
+                  <Option value="credit">信用卡</Option>
+                </Select>
+              </Form.Item>
+              <Form.Item>
+                <Button type="primary" htmlType="submit" block size="large">
+                  确认支付 ¥{order.total_price?.toLocaleString()}
+                </Button>
+              </Form.Item>
+            </Form>
+          </>
+        )}
       </Modal>
 
       <Modal
