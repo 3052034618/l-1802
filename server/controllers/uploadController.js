@@ -71,7 +71,7 @@ const uploadFile = async (req, res) => {
 
     res.json(success({
       filename: req.file.filename,
-      originalName: file.originalname || req.file.originalname,
+      originalName: req.file.originalname,
       url: fileUrl,
       fullUrl,
       size: req.file.size,

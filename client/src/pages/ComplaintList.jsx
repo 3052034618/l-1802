@@ -306,14 +306,22 @@ const ComplaintList = () => {
     }
   }
 
-  const handleVoucherChange = async ({ file, fileList }) => {
+  const handleVoucherChange = async (info) => {
+    const { file, fileList } = info
+    
     if (file.status === 'uploading') {
       setVouchers(fileList)
       return
     }
-    if (file.status === 'done' || file.originFileObj) {
+    
+    if (file.status === 'done') {
       try {
         const originFile = file.originFileObj || file
+        if (!originFile) {
+          setVouchers(fileList.filter(f => f.uid !== file.uid))
+          return
+        }
+        
         const uploaded = await uploadFile('voucher', originFile)
         const updatedList = fileList.map(f => {
           if (f.uid === file.uid) {
@@ -328,10 +336,16 @@ const ComplaintList = () => {
           return f
         })
         setVouchers(updatedList)
+        message.success(`「${uploaded.originalName || file.name}」上传成功`)
       } catch (err) {
-        message.error('凭证上传失败')
+        message.error(`「${file.name}」上传失败：${err?.message || '请重试'}`)
         setVouchers(fileList.filter(f => f.uid !== file.uid))
       }
+      return
+    }
+    
+    if (file.status === 'error' || file.status === 'removed') {
+      setVouchers(fileList.filter(f => f.uid !== file.uid))
     }
   }
 

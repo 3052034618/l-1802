@@ -150,14 +150,21 @@ const OrderDetail = () => {
     }
   }
 
-  const handleQualityPhotoChange = async ({ file, fileList }) => {
+  const handleQualityPhotoChange = async (info) => {
+    const { file, fileList } = info
+    
     if (file.status === 'uploading') {
       setPhotos(fileList)
       return
     }
-    if (file.status === 'done' || file.originFileObj) {
+    
+    if (file.status === 'done') {
       try {
         const originFile = file.originFileObj || file
+        if (!originFile) {
+          setPhotos(fileList.filter(f => f.uid !== file.uid))
+          return
+        }
         const uploaded = await uploadFile('quality', originFile)
         const updatedList = fileList.map(f => {
           if (f.uid === file.uid) {
@@ -165,16 +172,24 @@ const OrderDetail = () => {
               ...f,
               status: 'done',
               url: uploaded.url,
-              response: uploaded
+              name: uploaded.originalName || f.name,
+              response: uploaded,
+              thumbUrl: uploaded.fullUrl || uploaded.url
             }
           }
           return f
         })
         setPhotos(updatedList)
+        message.success(`「${uploaded.originalName || file.name}」上传成功`)
       } catch (err) {
-        message.error('照片上传失败')
+        message.error(`「${file.name}」上传失败：${err?.message || '请重试'}`)
         setPhotos(fileList.filter(f => f.uid !== file.uid))
       }
+      return
+    }
+    
+    if (file.status === 'error' || file.status === 'removed') {
+      setPhotos(fileList.filter(f => f.uid !== file.uid))
     }
   }
 
@@ -215,6 +230,13 @@ const OrderDetail = () => {
     else if (status === 'completed') currentStep = 5
 
     return { steps, currentStep }
+  }
+
+  const openDesignModal = () => {
+    if (designDimensionsList.length === 0) {
+      addDesignDimension()
+    }
+    setDesignModalVisible(true)
   }
 
   const handleSubmitDesign = async (values) => {
@@ -355,14 +377,21 @@ const OrderDetail = () => {
     }
   }
 
-  const handleComplaintVoucherChange = async ({ file, fileList }) => {
+  const handleComplaintVoucherChange = async (info) => {
+    const { file, fileList } = info
+    
     if (file.status === 'uploading') {
       setComplaintVouchers(fileList)
       return
     }
-    if (file.status === 'done' || file.originFileObj) {
+    
+    if (file.status === 'done') {
       try {
         const originFile = file.originFileObj || file
+        if (!originFile) {
+          setComplaintVouchers(fileList.filter(f => f.uid !== file.uid))
+          return
+        }
         const uploaded = await uploadFile('voucher', originFile)
         const updatedList = fileList.map(f => {
           if (f.uid === file.uid) {
@@ -377,10 +406,16 @@ const OrderDetail = () => {
           return f
         })
         setComplaintVouchers(updatedList)
+        message.success(`「${uploaded.originalName || file.name}」上传成功`)
       } catch (err) {
-        message.error('凭证上传失败')
+        message.error(`「${file.name}」上传失败：${err?.message || '请重试'}`)
         setComplaintVouchers(fileList.filter(f => f.uid !== file.uid))
       }
+      return
+    }
+    
+    if (file.status === 'error' || file.status === 'removed') {
+      setComplaintVouchers(fileList.filter(f => f.uid !== file.uid))
     }
   }
 
@@ -424,7 +459,7 @@ const OrderDetail = () => {
           </div>
           <Space>
             {user?.role === 'designer' && order.status === 'designing' && (
-              <Button type="primary" onClick={() => setDesignModalVisible(true)}>
+              <Button type="primary" onClick={openDesignModal}>
                 提交设计方案
               </Button>
             )}
@@ -721,82 +756,73 @@ const OrderDetail = () => {
                   {deviationData.length > 0 && (
                     <div>
                       <div style={{ color: '#666', fontSize: 12, marginBottom: 8 }}>📐 尺寸比对结果：</div>
-                      <Table
-                        size="small"
-                        dataSource={deviationData}
-                        rowKey={(record, idx) => String(record?.id || record?.dimensionId || idx)}
-                        pagination={false}
-                        columns={[
-                          {
-                            title: '部位',
-                            key: 'name',
-                            render: (_, record) => (
-                              <span>
-                                {record?.itemName || record?.item_name || '未知构件'}
-                                {(record?.partName || record?.part_name) && ` (${record?.partName || record?.part_name})`}
-                              </span>
-                            )
-                          },
-                          {
-                            title: '类型',
-                            dataIndex: 'dimensionType',
-                            width: 60,
-                            render: (t) => ({
-                              width: '宽度',
-                              height: '高度',
-                              depth: '深度',
-                              thickness: '厚度'
-                            }[t] || t || '-')
-                          },
-                          {
-                            title: '设计值',
-                            key: 'design',
-                            width: 80,
-                            render: (_, record) => `${record?.designValue ?? record?.design_value ?? '-'}${record?.unit || 'mm'}`
-                          },
-                          {
-                            title: '实测值',
-                            key: 'measured',
-                            width: 80,
-                            render: (_, record) => `${record?.measuredValue ?? record?.measured_value ?? '-'}${record?.unit || 'mm'}`
-                          },
-                          {
-                            title: '公差±',
-                            key: 'tolerance',
-                            width: 70,
-                            render: (_, record) => `${record?.tolerance ?? '-'}${record?.unit || 'mm'}`
-                          },
-                          {
-                            title: '偏差',
-                            key: 'deviation',
-                            width: 70,
-                            render: (_, record) => {
-                              const dev = record?.deviation
-                              const exceeded = Boolean(record?.isExceeded)
-                              if (dev == null) return '-'
-                              return (
-                                <span style={{ color: exceeded ? '#f5222d' : '#52c41a', fontWeight: exceeded ? 500 : 'normal' }}>
-                                  {dev}{record?.unit || 'mm'}
-                                  {exceeded && ' ⚠️'}
-                                </span>
-                              )
-                            }
-                          },
-                          {
-                            title: '结果',
-                            key: 'result',
-                            width: 70,
-                            render: (_, record) => {
-                              const exceeded = Boolean(record?.isExceeded)
-                              return (
-                                <Tag color={exceeded ? 'red' : 'green'}>
-                                  {exceeded ? '超标' : '合格'}
+                      <div style={{ 
+                        border: '1px solid #f0f0f0', 
+                        borderRadius: 4, 
+                        overflow: 'hidden',
+                        fontSize: 12 
+                      }}>
+                        <div style={{ 
+                          display: 'flex', 
+                          background: '#fafafa', 
+                          fontWeight: 500,
+                          borderBottom: '1px solid #f0f0f0'
+                        }}>
+                          <div style={{ flex: 2, padding: '6px 8px' }}>部位</div>
+                          <div style={{ flex: 1, padding: '6px 8px', textAlign: 'center' }}>类型</div>
+                          <div style={{ flex: 1, padding: '6px 8px', textAlign: 'center' }}>设计值</div>
+                          <div style={{ flex: 1, padding: '6px 8px', textAlign: 'center' }}>实测值</div>
+                          <div style={{ flex: 1, padding: '6px 8px', textAlign: 'center' }}>公差</div>
+                          <div style={{ flex: 1, padding: '6px 8px', textAlign: 'center' }}>偏差</div>
+                          <div style={{ flex: 1, padding: '6px 8px', textAlign: 'center' }}>结果</div>
+                        </div>
+                        {deviationData.map((record, idx) => {
+                          const itemName = record?.itemName || record?.item_name || '未知构件'
+                          const partName = record?.partName || record?.part_name || ''
+                          const dimType = record?.dimensionType || record?.dimension_type || '-'
+                          const typeMap = { width: '宽度', height: '高度', depth: '深度', thickness: '厚度' }
+                          const typeLabel = typeMap[dimType] || dimType
+                          const designVal = record?.designValue ?? record?.design_value ?? '-'
+                          const measuredVal = record?.measuredValue ?? record?.measured_value ?? '-'
+                          const tolerance = record?.tolerance ?? '-'
+                          const deviation = record?.deviation
+                          const unit = record?.unit || 'mm'
+                          const isExceeded = Boolean(record?.isExceeded)
+                          
+                          return (
+                            <div 
+                              key={String(record?.id || record?.dimensionId || idx)} 
+                              style={{ 
+                                display: 'flex', 
+                                borderBottom: idx < deviationData.length - 1 ? '1px solid #f5f5f5' : 'none'
+                              }}
+                            >
+                              <div style={{ flex: 2, padding: '6px 8px' }}>
+                                {itemName}{partName && ` (${partName})`}
+                              </div>
+                              <div style={{ flex: 1, padding: '6px 8px', textAlign: 'center' }}>{typeLabel}</div>
+                              <div style={{ flex: 1, padding: '6px 8px', textAlign: 'center' }}>{designVal}{unit}</div>
+                              <div style={{ flex: 1, padding: '6px 8px', textAlign: 'center' }}>{measuredVal}{unit}</div>
+                              <div style={{ flex: 1, padding: '6px 8px', textAlign: 'center' }}>±{tolerance}{unit}</div>
+                              <div style={{ 
+                                flex: 1, 
+                                padding: '6px 8px', 
+                                textAlign: 'center',
+                                color: isExceeded ? '#f5222d' : '#52c41a',
+                                fontWeight: isExceeded ? 500 : 'normal'
+                              }}>
+                                {deviation != null ? `${deviation}${unit}` : '-'}
+                                {isExceeded && ' ⚠️'}
+                              </div>
+                              <div style={{ flex: 1, padding: '6px 8px', textAlign: 'center' }}>
+                                <Tag color={isExceeded ? 'red' : 'green'} style={{ margin: 0 }}>
+                                  {isExceeded ? '超标' : '合格'}
                                 </Tag>
-                              )
-                            }
-                          }
-                        ]}
-                      />
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
                     </div>
                   )}
                 </Card>
