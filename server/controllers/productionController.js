@@ -30,6 +30,27 @@ const scheduleProduction = async (req, res) => {
       return res.json(error('该订单已有进行中的生产任务'));
     }
 
+    if (productionLine && scheduleDate) {
+      const lines = [
+        { id: 'A线-木工车间', capacity: 10 },
+        { id: 'B线-木工车间', capacity: 8 },
+        { id: 'C线-喷漆车间', capacity: 6 },
+        { id: 'D线-组装车间', capacity: 12 }
+      ];
+      const lineConfig = lines.find(l => l.id === productionLine);
+      if (lineConfig) {
+        const [dayOrders] = await connection.query(
+          `SELECT COUNT(*) as count FROM production_orders 
+           WHERE production_line = ? AND schedule_date = ? AND status != 'completed'`,
+          [productionLine, scheduleDate]
+        );
+        const currentCount = dayOrders[0]?.count || 0;
+        if (currentCount >= lineConfig.capacity) {
+          return res.json(error(`产线「${productionLine}」在 ${scheduleDate} 产能已满（${currentCount}/${lineConfig.capacity}），请更换日期或选择其他产线`));
+        }
+      }
+    }
+
     const productionNo = generateProductionNo();
 
     const [result] = await connection.query(

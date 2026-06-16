@@ -2,7 +2,11 @@ const { verifyToken } = require('../utils/auth');
 const { error } = require('../utils/response');
 
 const authMiddleware = (req, res, next) => {
-  const token = req.headers.authorization?.replace('Bearer ', '');
+  let token = req.headers.authorization?.replace('Bearer ', '');
+  
+  if (!token) {
+    token = req.query?.token || req.body?.token || null;
+  }
   
   if (!token) {
     return res.status(401).json(error('请先登录', 401));

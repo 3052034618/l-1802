@@ -10,7 +10,7 @@ import {
 import { useNavigate } from 'react-router-dom'
 import { useUserStore } from '../store'
 import { getComplaintList, handleComplaint, getComplaintDetail } from '../api/complaint'
-import { uploadFile, getFileUrl } from '../api/upload'
+import { uploadFile, getFileUrl, downloadFile } from '../api/upload'
 import dayjs from 'dayjs'
 
 const { Option } = Select
@@ -215,7 +215,7 @@ const ComplaintList = () => {
                 icon={<DownloadOutlined />}
                 onClick={(e) => {
                   e.stopPropagation()
-                  window.open(getFileUrl(v.url), '_blank')
+                  downloadFile(v.url, v.originalName || `${v.sourceLabel}${idx + 1}`)
                 }}
               >
                 {v.sourceLabel.slice(0, 2)}
@@ -390,7 +390,7 @@ const ComplaintList = () => {
                         <Button
                           key={idx}
                           icon={<DownloadOutlined />}
-                          onClick={() => window.open(getFileUrl(v.url), '_blank')}
+                          onClick={() => downloadFile(v.url, v.originalName || `客户凭证${idx + 1}`)}
                         >
                           {v.originalName || `凭证${idx + 1}`}
                         </Button>
@@ -451,7 +451,7 @@ const ComplaintList = () => {
                               key={idx}
                               type="primary"
                               icon={<DownloadOutlined />}
-                              onClick={() => window.open(getFileUrl(v.url), '_blank')}
+                              onClick={() => downloadFile(v.url, v.originalName || `处理凭证${idx + 1}`)}
                             >
                               {v.originalName || `下载凭证 ${idx + 1}`}
                             </Button>

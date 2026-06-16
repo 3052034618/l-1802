@@ -394,7 +394,7 @@ const OrderDetail = () => {
     { title: '数量', dataIndex: 'quantity', key: 'quantity', width: 80 },
     { title: '单价(元)', dataIndex: 'unit_price', key: 'unit_price', width: 100 },
     { title: '总价(元)', dataIndex: 'total_price', key: 'total_price', width: 120,
-      render: (val) => `¥${val?.toLocaleString()}` }
+      render: (val) => val != null ? `¥${val?.toLocaleString()}` : '-' }
   ]
 
   if (!order) {
@@ -656,8 +656,12 @@ const OrderDetail = () => {
                 let photos = []
                 let deviationData = []
                 try {
-                  photos = typeof item.photos === 'string' ? JSON.parse(item.photos) : (item.photos || [])
+                  const rawPhotos = typeof item.photos === 'string' ? JSON.parse(item.photos) : (item.photos || [])
+                  photos = Array.isArray(rawPhotos)
+                    ? rawPhotos.map(p => typeof p === 'string' ? { url: p, originalName: null } : p || {}).filter(p => p.url)
+                    : []
                   deviationData = typeof item.deviation_data === 'string' ? JSON.parse(item.deviation_data) : (item.deviation_data || [])
+                  if (!Array.isArray(deviationData)) deviationData = []
                 } catch (e) {
                   photos = []
                   deviationData = []
@@ -689,17 +693,17 @@ const OrderDetail = () => {
                     <div style={{ marginBottom: 12 }}>
                       <div style={{ color: '#666', fontSize: 12, marginBottom: 8 }}>📷 成品照片：</div>
                       <Space wrap>
-                        {photos.map((url, idx) => (
+                        {photos.map((p, idx) => (
                           <a
                             key={idx}
-                            href={getFileUrl(url)}
+                            href={getFileUrl(p.url)}
                             target="_blank"
                             rel="noopener noreferrer"
                             style={{ display: 'inline-block' }}
                           >
                             <img
-                              src={getFileUrl(url)}
-                              alt={`质检照片${idx + 1}`}
+                              src={getFileUrl(p.url)}
+                              alt={p.originalName || `质检照片${idx + 1}`}
                               style={{
                                 width: 80,
                                 height: 80,
@@ -720,7 +724,7 @@ const OrderDetail = () => {
                       <Table
                         size="small"
                         dataSource={deviationData}
-                        rowKey={(record, idx) => idx}
+                        rowKey={(record, idx) => String(record?.id || record?.dimensionId || idx)}
                         pagination={false}
                         columns={[
                           {
@@ -728,8 +732,8 @@ const OrderDetail = () => {
                             key: 'name',
                             render: (_, record) => (
                               <span>
-                                {record.itemName}
-                                {record.partName && ` (${record.partName})`}
+                                {record?.itemName || record?.item_name || '未知构件'}
+                                {(record?.partName || record?.part_name) && ` (${record?.partName || record?.part_name})`}
                               </span>
                             )
                           },
@@ -742,46 +746,54 @@ const OrderDetail = () => {
                               height: '高度',
                               depth: '深度',
                               thickness: '厚度'
-                            }[t] || t)
+                            }[t] || t || '-')
                           },
                           {
                             title: '设计值',
                             key: 'design',
                             width: 80,
-                            render: (_, record) => `${record.designValue}${record.unit || 'mm'}`
+                            render: (_, record) => `${record?.designValue ?? record?.design_value ?? '-'}${record?.unit || 'mm'}`
                           },
                           {
                             title: '实测值',
                             key: 'measured',
                             width: 80,
-                            render: (_, record) => `${record.measuredValue}${record.unit || 'mm'}`
+                            render: (_, record) => `${record?.measuredValue ?? record?.measured_value ?? '-'}${record?.unit || 'mm'}`
                           },
                           {
                             title: '公差±',
                             key: 'tolerance',
                             width: 70,
-                            render: (_, record) => `${record.tolerance}${record.unit || 'mm'}`
+                            render: (_, record) => `${record?.tolerance ?? '-'}${record?.unit || 'mm'}`
                           },
                           {
                             title: '偏差',
                             key: 'deviation',
                             width: 70,
-                            render: (_, record) => (
-                              <span style={{ color: record.isExceeded ? '#f5222d' : '#52c41a', fontWeight: record.isExceeded ? 500 : 'normal' }}>
-                                {record.deviation}{record.unit || 'mm'}
-                                {record.isExceeded && ' ⚠️'}
-                              </span>
-                            )
+                            render: (_, record) => {
+                              const dev = record?.deviation
+                              const exceeded = Boolean(record?.isExceeded)
+                              if (dev == null) return '-'
+                              return (
+                                <span style={{ color: exceeded ? '#f5222d' : '#52c41a', fontWeight: exceeded ? 500 : 'normal' }}>
+                                  {dev}{record?.unit || 'mm'}
+                                  {exceeded && ' ⚠️'}
+                                </span>
+                              )
+                            }
                           },
                           {
                             title: '结果',
                             key: 'result',
                             width: 70,
-                            render: (_, record) => (
-                              <Tag color={record.isExceeded ? 'red' : 'green'}>
-                                {record.isExceeded ? '超标' : '合格'}
-                              </Tag>
-                            )
+                            render: (_, record) => {
+                              const exceeded = Boolean(record?.isExceeded)
+                              return (
+                                <Tag color={exceeded ? 'red' : 'green'}>
+                                  {exceeded ? '超标' : '合格'}
+                                </Tag>
+                              )
+                            }
                           }
                         ]}
                       />
@@ -1033,18 +1045,17 @@ const OrderDetail = () => {
               {recommendData?.allLines?.map((line) => (
                 <Option 
                   key={line.id} 
-                  value={line.id} 
-                  disabled={line.isFull}
+                  value={line.id}
                   label={
                     <span>
                       {line.name}
-                      <Tag color={line.isFull ? 'red' : 'green'} style={{ marginLeft: 8 }}>
-                        {line.isFull ? '产能已满' : `负载${line.loadRate}%`}
+                      <Tag color={line.isFull ? 'orange' : 'green'} style={{ marginLeft: 8 }}>
+                        {line.isFull ? '近期满载' : `负载${line.loadRate}%`}
                       </Tag>
                     </span>
                   }
                 >
-                  {line.name} ({line.isFull ? '产能已满' : `负载${line.loadRate}%`})
+                  {line.name} ({line.isFull ? '近期排满-改远期可用' : `负载${line.loadRate}%`})
                 </Option>
               ))}
             </Select>
@@ -1054,15 +1065,15 @@ const OrderDetail = () => {
               style={{ width: '100%' }} 
               minDate={dayjs()}
               format="YYYY-MM-DD"
-              placeholder={recommendData?.allLinesFull ? '所有产线已满，请选择更远的日期' : '请选择排产日期'}
+              placeholder={recommendData?.allLinesFull ? '近期已满，请选更远日期' : '请选择排产日期'}
             />
           </Form.Item>
           <Form.Item name="remark" label="备注">
             <TextArea rows={2} placeholder={recommendData?.allLinesFull ? '请说明特殊排产原因或协调方案' : '请输入备注（可选）'} />
           </Form.Item>
-          <Form.Item>
-            <Button type="primary" htmlType="submit" block loading={loading} disabled={recommendData?.allLines?.every(l => l.isFull)}>
-              {recommendData?.allLines?.every(l => l.isFull) ? '所有产线已满，无法提交' : '确认排产'}
+          <Form.Item style={{ marginBottom: 0 }}>
+            <Button type="primary" htmlType="submit" block loading={loading}>
+              确认排产
             </Button>
           </Form.Item>
         </Form>
